@@ -24,6 +24,18 @@ fields for each other branch after the selected branch's primary details.
 
 **Two independent branch selectors per environment:** `Ветка для просмотра`
 changes only the branch whose SHA/status is displayed; **no Git checkout**.
+The Docker view initially shows Docker's active branch. The Windows view is
+**not inferred from Docker**: until Windows is checked it is unknown; on Check
+it defaults to the actual Windows active branch (often `main`). Only a view
+branch explicitly selected by the user persists across further checks. In the
+details pane, a dedicated read-only `MAIN` block always shows known GitHub,
+Docker-local and Windows-local `main` SHAs separately from the active Docker
+branch. Dirty Docker feature branches must never be presented as a reason to
+push their changes into GitHub `main`. When clean Windows `main` is verified
+behind GitHub `main`, the workflow offers `Pull Windows main` even if Docker
+is editing an unrelated feature branch; the guarded Windows fast-forward rules
+are unchanged.
+
 `Активная ветка` always reports actual `symbolic-ref HEAD` from that environment;
 clicking it offers local existing branches for an explicit Git switch (with
 confirmation and fresh preflight). Switching does **not** change the branch

@@ -46,6 +46,8 @@ namespace FortisMirror {
     internal readonly List<string> WindowsFiles = new List<string>();
     internal string DockerView = "";
     internal string WindowsView = "";
+    // Distinguish an explicit view selection from the unverified default.
+    internal bool WindowsViewExplicit;
     internal string WindowsPath = "";
     internal string WindowsActive = "";
     internal string WindowsHead = "";
@@ -365,7 +367,8 @@ namespace FortisMirror {
       }
       foreach (var r in found) {
         r.DockerView = r.DockerActive;
-        r.WindowsView = r.DockerActive;
+        // Docker inventory cannot know the Windows active branch. Never guess.
+        r.WindowsView = "";
         r.WindowsExists = Directory.Exists(r.WindowsPath) &&
           Directory.Exists(Path.Combine(r.WindowsPath, ".git"));
       }
@@ -600,12 +603,24 @@ namespace FortisMirror {
         return new string[] { "WINDOWS: ИСТОРИИ РАЗОШЛИСЬ", "Не выполнять Pull" };
       if (w != null && w.WindowsAhead > 0)
         return new string[] { "WINDOWS НЕОЖИДАННО ВПЕРЕДИ", "Разобрать локальные Windows-коммиты" };
+      // A clean Windows main may be behind GitHub while Docker is actively
+      // editing a different, dirty feature branch. Pull Windows main is still
+      // safe after the independent fast-forward preflight in CanPull/BeginPull.
+      if (r.CheckedGithub && r.CheckedWindows && r.WindowsActive == "main" &&
+        r.WindowsChanges == 0 && w != null &&
+        w.WindowsAhead == 0 && w.WindowsBehind > 0)
+        return new string[] {
+          r.DockerChanges > 0 ? "WINDOWS ОТСТАЁТ + DOCKER DIRTY" : "WINDOWS ОТСТАЁТ",
+          r.DockerChanges > 0 ? "Pull Windows main; Docker-правки не трогать" : "Pull Windows main"
+        };
       if (d != null && d.DockerAhead > 0 && d.DockerBehind > 0)
         return new string[] { "DOCKER: ИСТОРИИ РАЗОШЛИСЬ", "Ручной разбор Git-истории" };
       if (d != null && d.DockerBehind > 0 && d.DockerAhead == 0)
         return new string[] { "DOCKER ОТСТАЁТ", "Проверить неожиданное состояние Docker" };
       if (r.DockerChanges > 0)
-        return new string[] { "DOCKER: ИЗМЕНЕНИЯ", "Commit в Docker → Push" };
+        return new string[] { "DOCKER: ИЗМЕНЕНИЯ",
+          r.DockerActive == "main" ? "Проверить изменения Docker перед Commit/Push" :
+          "Незавершённая Docker-ветка; НЕ push в main" };
       if (r.DockerChanges < 0)
         return new string[] { "DOCKER: НЕ ПРОВЕРЕН", "Проверить Docker git status" };
       if (d != null && d.DockerAhead > 0 && d.DockerBehind == 0)
@@ -734,6 +749,20 @@ namespace FortisMirror {
       b.AppendLine("Docker origin: " + (r.DockerOrigin.Length > 0 ? r.DockerOrigin : "НЕ ПРОВЕРЕН"));
       b.AppendLine("Просмотр ветки не выполняет checkout ни в Docker, ни в Windows.");
       b.AppendLine();
+      b.AppendLine("MAIN ОТДЕЛЬНО ОТ АКТИВНОЙ ВЕТКИ DOCKER (read-only)");
+      WfBranch main = r.Get("main");
+      b.AppendLine("GitHub main: " + (!r.CheckedGithub ? "НЕ ПРОВЕРЕН" :
+        main != null && main.GithubSha.Length > 0 ? main.GithubSha : "НЕТ В GITHUB"));
+      b.AppendLine("Docker локальная main: " +
+        (main != null && main.DockerSha.Length > 0 ? main.DockerSha : "НЕТ ЛОКАЛЬНОЙ ВЕТКИ"));
+      b.AppendLine("Windows локальная main: " +
+        (!r.CheckedWindows ? "НЕ ПРОВЕРЕНА" :
+        main != null && main.WindowsSha.Length > 0 ? main.WindowsSha : "НЕТ ЛОКАЛЬНОЙ ВЕТКИ"));
+      b.AppendLine("Windows main к GitHub: " + WindowsLabel(r, main));
+      b.AppendLine("Изменения Docker относятся к АКТИВНОЙ ветке " +
+        (r.DockerActive.Length > 0 ? r.DockerActive : "НЕИЗВЕСТНО") +
+        ", а не автоматически к main.");
+      b.AppendLine();
       b.AppendLine("ИЗМЕНЁННЫЕ ФАЙЛЫ В АКТИВНЫХ ВЕТКАХ (read-only git status)");
       AppendChangedFiles(b, "DOCKER", r.DockerActive, r.DockerChanges, r.DockerFiles);
       if (r.WindowsExists)
@@ -797,7 +826,7 @@ namespace FortisMirror {
             // Re-selecting the viewed branch is a pure no-op.
             if ((isDocker ? r.DockerView : r.WindowsView) == target) return;
             if (isDocker) r.DockerView = target;
-            else r.WindowsView = target;
+            else { r.WindowsView = target; r.WindowsViewExplicit = true; }
             RefreshRow(r);
           } else {
             // The already-active branch must NEVER trigger Git switch.
@@ -878,7 +907,12 @@ namespace FortisMirror {
       });
       if (old == null || old.Item == null) return;
       if (fresh.Get(old.DockerView) != null) fresh.DockerView = old.DockerView;
-      if (fresh.Get(old.WindowsView) != null) fresh.WindowsView = old.WindowsView;
+      // Preserve only a VIEW explicitly picked by the user, not an initial
+      // placeholder from the Docker snapshot. Default to Windows active main.
+      if (old.WindowsViewExplicit && fresh.Get(old.WindowsView) != null) {
+        fresh.WindowsView = old.WindowsView;
+        fresh.WindowsViewExplicit = true;
+      }
       fresh.Item = old.Item;
       fresh.Item.Tag = fresh;
       repos[repos.IndexOf(old)] = fresh;
