@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent / "tools/Docker-Mirror-Git-Actions.py"
 
@@ -156,6 +157,32 @@ class DockerGitActionsTest(unittest.TestCase):
             r"https://github\.com/AlexPastukhh/[A-Za-z0-9_-]+\.git\Z")
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.actions.exact_repo(self.root, "fixture")
+
+    def test_github_https_git_operations_use_persistent_fortis_helper(self):
+        # No real GitHub access: inspect the exact Git argv only.
+        helper = Path(self.tmp.name) / "fortis-helper"
+        helper.write_text("#!/bin/sh\nexit 1\n")
+        helper.chmod(0o700)
+        remote = "https://github.com/AlexPastukhh/fixture.git"
+        completed = subprocess.CompletedProcess(["git"], 0, stdout=b"", stderr=b"")
+        # The test tempfile lives on Docker /tmp (noexec), so mock only the
+        # executable-bit probe while still validating the complete command.
+        with mock.patch.object(self.actions, "GITHUB_HELPER", helper), \
+             mock.patch.object(self.actions.os, "access", return_value=True), \
+             mock.patch.object(self.actions.mirror, "git", return_value=remote), \
+             mock.patch.object(self.actions.subprocess, "run", return_value=completed) as invoked:
+            self.assertEqual(b"", self.actions.git_result(
+                self.repo, ["ls-remote", "origin", "refs/heads/main"]))
+        argv = invoked.call_args.args[0]
+        self.assertIn("credential.helper=", argv)
+        self.assertIn("credential.helper=" + str(helper), argv)
+        self.assertIn("credential.useHttpPath=true", argv)
+        self.assertIn("http.sslVerify=true", argv)
+        self.assertNotIn("force", argv)
+        with mock.patch.object(self.actions, "GITHUB_HELPER", Path(self.tmp.name) / "missing"), \
+             mock.patch.object(self.actions.mirror, "git", return_value=remote):
+            with self.assertRaisesRegex(ValueError, "helper is unavailable"):
+                self.actions.git_result(self.repo, ["push", "origin", "main"], write=True)
 
     def test_protected_names_and_stale_push(self):
         with self.assertRaisesRegex(ValueError, "protected"):

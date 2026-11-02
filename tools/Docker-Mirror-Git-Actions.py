@@ -26,15 +26,32 @@ SHA = mirror.SHA
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 NO_SHA = "0" * 40
 PROTECTED = mirror.PROTECTED
+GITHUB_HELPER = Path("/workspace/repo/.fortis-auth/git-credential-fortis-shared")
 
 
 def git_result(repo, args, *, write=False, timeout=45):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never",
                GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="1" if write else "0",
                GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10")
+    # VS Code Dev Containers may replace the global credential.helper with a
+    # short-lived VS Code bridge. Network writes/reads to approved GitHub HTTPS
+    # origins must use the persistent owner-configured Fortis credential helper.
+    # Do not read, display or copy the PAT into the command line or repository.
+    credential_flags = []
+    if args and args[0] in ("ls-remote", "push"):
+        origin = mirror.git(repo, "remote", "get-url", "origin") or ""
+        if origin.startswith("https://github.com/AlexPastukhh/"):
+            if (not GITHUB_HELPER.is_file() or GITHUB_HELPER.is_symlink() or
+                    not os.access(str(GITHUB_HELPER), os.X_OK)):
+                raise ValueError("Fortis shared GitHub credential helper is unavailable")
+            credential_flags = [
+                "-c", "credential.helper=",
+                "-c", "credential.helper=" + str(GITHUB_HELPER),
+                "-c", "credential.useHttpPath=true",
+            ]
     full = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
             "-c", "http.sslVerify=true", "-c", "submodule.recurse=false",
-            "-C", str(repo), *args]
+            *credential_flags, "-C", str(repo), *args]
     try:
         result = subprocess.run(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, timeout=timeout, check=False)

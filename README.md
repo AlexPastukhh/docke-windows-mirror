@@ -50,6 +50,12 @@ requires confirmation and never uses force. The shared infrastructure
 repositories (`script-control-center`, `docke-windows-mirror`, `security`,
 `tunnel`, `rd-graphs`) cannot be mutated through these GUI actions.
 
+For GitHub HTTPS network operations, the Docker helper uses the persistent
+`/workspace/repo/.fortis-auth/git-credential-fortis-shared` instead of the
+temporary VS Code credential bridge. A repository must be granted access in
+the existing fine-grained PAT. No token is stored in this repository or
+passed on the command line. SSH-origin authentication remains separate.
+
 ## Tests
 
 From the Docker project directory:
