@@ -1,4 +1,6 @@
-# Docker–Windows Mirror
+# docke-windows-mirror
+
+Standalone Docker–Windows Mirror application.
 
 Independent Windows PowerShell 5.1 / WinForms interface for checking Docker,
 GitHub, and Windows Git mirrors. The primary Git repositories live inside
