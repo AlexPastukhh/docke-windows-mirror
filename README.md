@@ -2,7 +2,7 @@
 
 Standalone Docker–Windows Mirror application.
 
-Independent Windows PowerShell 5.1 / WinForms interface for checking Docker,
+Canonical source for the independent Windows PowerShell 5.1 / WinForms interface for checking Docker,
 GitHub, and Windows Git mirrors. The primary Git repositories live inside
 Fortis Docker; Windows is a receiver. All actions are owner-triggered.
 
@@ -13,6 +13,19 @@ Docker source: `/workspace/repo/Repos/docke-windows-mirror`
 Windows clone: `%USERPROFILE%\Repos\docke-windows-mirror`
 
 GitHub: https://github.com/AlexPastukhh/docke-windows-mirror
+
+## Repository boundaries
+
+All Mirror UI sources, Docker exporters, Git actions, legacy implementation,
+tests, and Mirror-specific documentation are maintained **here**.
+
+The stable Script Center launcher at
+`%USERPROFILE%\Repos\script-control-center\Fortis-Windows-Mirror-Status.ps1`
+is a thin compatibility wrapper which runs the standalone launcher from
+`%USERPROFILE%\Repos\docke-windows-mirror`. It does not compile or run
+a local copy of the old UI. Keep both Windows clones alongside one another.
+
+[Detailed Mirror workflow and security behavior](docs/WORKFLOW.md).
 
 ## Windows
 
@@ -46,5 +59,5 @@ python3 -B -m unittest -q test_mirror_workflow_source test_mirror_docker_actions
 ```
 
 The Windows compilation test must also pass on an actual Windows system.
-Do not delete the original Mirror files in `script-control-center` until
-Windows compilation and the new standalone launcher are verified.
+Windows PowerShell 5.1 compilation and GUI behavior still require owner
+verification on Windows after the two repository updates.
