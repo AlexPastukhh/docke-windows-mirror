@@ -25,7 +25,6 @@ ROOT = mirror.ROOT
 SHA = mirror.SHA
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 NO_SHA = "0" * 40
-PROTECTED = mirror.PROTECTED
 GITHUB_HELPER = Path("/workspace/repo/.fortis-auth/git-credential-fortis-shared")
 
 
@@ -65,8 +64,6 @@ def git_result(repo, args, *, write=False, timeout=45):
 
 
 def exact_repo(root, name):
-    if name in PROTECTED:
-        raise ValueError("protected infrastructure repository; use direct owner workflow")
     repo = mirror.safe_repo(root, name)
     if repo is None:
         raise ValueError("Docker repository is missing or unsafe")

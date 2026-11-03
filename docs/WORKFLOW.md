@@ -89,11 +89,10 @@ fetches, pushes or changes a worktree. The owner-only actions are:
 - These three buttons call `tools/Docker-Mirror-Git-Actions.py` **inside**
   `fortis-repo-test` as uid 1000; the Windows process is a UI/controller only.
   The operation target is always the **actual active Docker branch**, not
-  the branch selected for viewing. Stage/Commit/Push are blocked for protected
-  infrastructure names (`tunnel`, `rd-graphs`, `script-control-center`,
-  `docke-windows-mirror`, `security`) in this workflow, to avoid changing service-critical
-  repositories through a general status UI. Use a deliberate Docker
-  development/review workflow to modify those repositories.
+  the branch selected for viewing. No repository is blocked solely because
+  of its name: `rd-graphs`, `tunnel`, `security` and other projects
+  follow the same verified Git flow. Git writes still require the owner's
+  explicit selection, previews and confirmations; no service is restarted.
 - `Pull Windows` only for one verified clean Windows clone, the currently
   active **and viewed** Windows branch, approved Docker/Windows origin, and
   confirmed `WindowsAhead == 0`, `WindowsBehind > 0`. It confirms the exact
@@ -110,10 +109,9 @@ fetches, pushes or changes a worktree. The owner-only actions are:
 - Docker branch switch is **explicit owner action**, never automatic, and
   requires a clean Docker Git tree, existing local target branch, owner
   confirmation and reverified active branch/HEAD via exporter `--switch-*`.
-  Switching the shared infrastructure repositories `tunnel`, `rd-graphs`,
-  `script-control-center`, `docke-windows-mirror` and `security` is blocked in the GUI/exporter.
-  It can still affect files used by other running programs; do not treat the
-  GUI confirmation as approval to alter protected live infrastructure.
+  There is no name-based repository exclusion for switches. Switching a
+  working tree can affect files used by other running programs; check
+  operational impact separately. Confirmation does not restart services.
 
 **Windows is a receiver, not an authoring environment:** no Windows commit-all
 or push button in the new default screen. Unexpected local edits or Windows

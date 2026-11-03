@@ -97,9 +97,6 @@ namespace FortisMirror {
     private static readonly Regex AllowedOrigin =
       new Regex(@"^(?:https://github\.com/|git@github\.com:)AlexPastukhh/[A-Za-z0-9_.-]+(?:\.git)?$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-    private static readonly HashSet<string> Protected =
-      new HashSet<string>(new string[] { "tunnel", "rd-graphs", "script-control-center", "docke-windows-mirror", "security" },
-        StringComparer.OrdinalIgnoreCase);
     private readonly string root, git;
     private readonly ListView list = new ListView();
     private readonly TextBox details = new TextBox();
@@ -691,8 +688,7 @@ namespace FortisMirror {
         SafeRepo.IsMatch(activeDocker.Name) &&
         ValidBranch(activeDocker.DockerActive) &&
         Sha.IsMatch(activeDocker.DockerHead) &&
-        ValidOrigin(activeDocker.DockerOrigin) &&
-        !Protected.Contains(activeDocker.Name);
+        ValidOrigin(activeDocker.DockerOrigin);
       stageDocker.Enabled = usableDocker && activeDocker.DockerChanges > 0;
       commitDocker.Enabled = usableDocker && activeDocker.DockerChanges > 0;
       pushDocker.Enabled = usableDocker;
@@ -816,7 +812,7 @@ namespace FortisMirror {
         if (!isView) {
           entry.Enabled = isDocker ?
             r.DockerChanges == 0 && b != null && b.DockerSha.Length > 0 &&
-            !Protected.Contains(r.Name) && ValidOrigin(r.DockerOrigin) :
+            ValidOrigin(r.DockerOrigin) :
             r.WindowsValid && r.WindowsOriginValid && r.WindowsChanges == 0 &&
             b != null && b.WindowsSha.Length > 0;
         }
@@ -1128,7 +1124,7 @@ namespace FortisMirror {
       WfRepo r = Selected();
       if (working || r == null || !SafeRepo.IsMatch(r.Name) ||
         !ValidBranch(r.DockerActive) || !Sha.IsMatch(r.DockerHead) ||
-        !ValidOrigin(r.DockerOrigin) || Protected.Contains(r.Name)) return;
+        !ValidOrigin(r.DockerOrigin)) return;
       string repoName = r.Name;
       working = true; writing = false;
       cancellation = new CancellationTokenSource();
@@ -1216,7 +1212,7 @@ namespace FortisMirror {
       });
     }
     private void BeginDockerGitWrite(WfRepo repo, string operation, string args) {
-      if (working || Selected() != repo || Protected.Contains(repo.Name)) return;
+      if (working || Selected() != repo) return;
       writing = true; working = true;
       cancellation = new CancellationTokenSource();
       status.Text = "Docker: выполняется " + operation + " для " + repo.Name + "...";
@@ -1332,7 +1328,7 @@ namespace FortisMirror {
       bool enabled = docker ?
         r.DockerChanges == 0 && Sha.IsMatch(r.DockerHead) &&
         Sha.IsMatch(branch.DockerSha) && ValidOrigin(r.DockerOrigin) &&
-        !Protected.Contains(r.Name) :
+        ValidOrigin(r.DockerOrigin) :
         r.WindowsExists && r.WindowsValid && r.WindowsOriginValid &&
         r.WindowsChanges == 0 && Sha.IsMatch(r.WindowsHead) &&
         Sha.IsMatch(branch.WindowsSha);

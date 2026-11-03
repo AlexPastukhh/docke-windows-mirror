@@ -96,7 +96,7 @@ class WorkflowSource(unittest.TestCase):
         self.assertIn('current.DockerActive != ready.Branch', source)
         self.assertIn('current.DockerHead != ready.Head', source)
         self.assertIn('ValidOrigin(r.DockerOrigin)', source)
-        self.assertIn('!Protected.Contains(activeDocker.Name)', source)
+        self.assertNotIn('Protected.Contains', source)
         self.assertIn('ChooseDockerStageFiles(current, ready)', source)
         self.assertIn('AskDockerCommitMessage(current, ready)', source)
         self.assertIn('MessageBoxDefaultButton.Button2', source)
@@ -171,7 +171,7 @@ class WorkflowSource(unittest.TestCase):
         self.assertIn("fetchedHead.Text != remote", source)
         self.assertIn("merge --ff-only FETCH_HEAD", source)
         self.assertIn("switch --no-guess", source)
-        self.assertIn("Protected.Contains(r.Name)", source)
+        self.assertNotIn("Protected.Contains", source)
         self.assertIn("!r.WindowsOriginValid", source)
         self.assertIn("r.WindowsChanges != 0", source)
         self.assertIn("target.WindowsAhead != 0 || target.WindowsBehind <= 0", source)
@@ -215,6 +215,42 @@ class WorkflowSource(unittest.TestCase):
         self.assertIn('rows.append("F\\t{}\\t{}".format(repo.name, encoded))', exporter)
         self.assertIn("for entry in changes.splitlines()[:500]", exporter)
         self.assertIn('.rstrip("\\r\\n")', exporter)
+
+    def test_name_does_not_block_owner_confirmed_switch(self):
+        module = load_exporter()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "Repos"
+            repo = root / "tunnel"
+            repo.mkdir(parents=True)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=10
+                ).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("branch", "-m", "main")
+            (repo / "README.md").write_text("safe fixture")
+            git("add", "README.md")
+            git("commit", "-qm", "main fixture")
+            git("remote", "add", "origin",
+                "https://github.com/AlexPastukhh/tunnel.git")
+            git("switch", "-qc", "work/test")
+            (repo / "feature.txt").write_text("feature")
+            git("add", "feature.txt")
+            git("commit", "-qm", "feature fixture")
+            head = git("rev-parse", "HEAD")
+
+            self.assertEqual(
+                "SWITCHED\ttunnel\tmain",
+                module.guarded_switch(root, "tunnel", "main", "work/test", head)
+            )
+            self.assertEqual("main", git("branch", "--show-current"))
+            self.assertEqual("", git("status", "--porcelain=v1"))
 
     def test_exporter_clean_and_comparison(self):
         module = load_exporter()
@@ -294,8 +330,6 @@ class WorkflowSource(unittest.TestCase):
                                                    "main", "work/test", work))
             self.assertEqual("main", git("branch", "--show-current"))
             self.assertEqual(head, git("rev-parse", "HEAD"))
-            with self.assertRaisesRegex(ValueError, "protected"):
-                module.guarded_switch(repos, "tunnel", "main", "work/test", work)
             with self.assertRaises(ValueError):
                 module.guarded_switch(repos, "testrepo", "../outside", "main", head)
             self.assertEqual("main", git("branch", "--show-current"))

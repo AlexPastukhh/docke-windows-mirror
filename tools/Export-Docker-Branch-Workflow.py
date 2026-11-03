@@ -22,10 +22,6 @@ ORIGIN = re.compile(
     r"(?:https://github\.com/|git@github\.com:)AlexPastukhh/[A-Za-z0-9_.-]+(?:\.git)?\Z",
     re.I,
 )
-# Shared services and core infrastructure must not be switched from a GUI.
-PROTECTED = frozenset(("tunnel", "rd-graphs", "script-control-center", "docke-windows-mirror", "security"))
-
-
 def valid_branch(s):
     return bool(BRANCH.fullmatch(s) and not s.startswith("-") and
                 not s.endswith("/") and ".." not in s and
@@ -111,8 +107,6 @@ def snapshot(root, names):
 
 def guarded_switch(root, name, target, expected_branch, expected_head):
     """Owner-reviewed switch only, no implicit creation, no remote checkout."""
-    if name in PROTECTED:
-        raise ValueError("protected infrastructure repository")
     repo = safe_repo(root, name)
     if repo is None or not valid_branch(target) or not valid_branch(expected_branch):
         raise ValueError("invalid Git repository or branch")

@@ -184,9 +184,36 @@ class DockerGitActionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "helper is unavailable"):
                 self.actions.git_result(self.repo, ["push", "origin", "main"], write=True)
 
-    def test_protected_names_and_stale_push(self):
-        with self.assertRaisesRegex(ValueError, "protected"):
-            self.actions.exact_repo(self.root, "tunnel")
+    def test_named_repositories_use_same_git_actions(self):
+        # No remote network or live repository: all fixtures are temporary.
+        self.actions.mirror.ORIGIN = re.compile(
+            r"https://github\.com/AlexPastukhh/[A-Za-z0-9_.-]+\.git\Z"
+        )
+        for name in ("rd-graphs", "tunnel", "script-control-center",
+                     "docke-windows-mirror", "security"):
+            with self.subTest(name=name):
+                repo = self.root / name
+                repo.mkdir()
+                def git(*args):
+                    return subprocess.run(
+                        ["git", "-C", str(repo), *args], check=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=10
+                    )
+                git("init", "-q")
+                git("config", "user.name", "Fixture")
+                git("config", "user.email", "fixture@example.invalid")
+                git("branch", "-m", "main")
+                (repo / "README.md").write_text("fixture")
+                git("add", "README.md")
+                git("commit", "-qm", "fixture")
+                git("remote", "add", "origin",
+                    "https://github.com/AlexPastukhh/" + name + ".git")
+                self.assertEqual(repo, self.actions.exact_repo(self.root, name))
+                preview = self.actions.stage_preview(self.root, name)
+                self.assertIn("FORTIS_DOCKER_STAGE_V1\tmain\t", preview)
+
+    def test_stale_push_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "moved since preview"):
             self.actions.push(self.root, "fixture", "main", self.initial_head,
                               "1" * 40)

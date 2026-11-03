@@ -46,9 +46,10 @@ checks happen only after clicking a check button.
 Stage/Commit/Push run through `tools/Docker-Mirror-Git-Actions.py` inside
 the Docker container, not through Windows Git. Branch and HEAD are rechecked;
 Stage uses a reviewed selection, Commit uses the reviewed index, and Push
-requires confirmation and never uses force. The shared infrastructure
-repositories (`script-control-center`, `docke-windows-mirror`, `security`,
-`tunnel`, `rd-graphs`) cannot be mutated through these GUI actions.
+requires confirmation and never uses force. There is no special repository
+blocklist: every valid Docker repository can use these actions, including
+`rd-graphs` and other infrastructure projects. Existing branch, origin,
+preview, freshness and owner-confirmation safeguards still apply.
 
 For GitHub HTTPS network operations, the Docker helper uses the persistent
 `/workspace/repo/.fortis-auth/git-credential-fortis-shared` instead of the
