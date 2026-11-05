@@ -1,0 +1,103 @@
+name: Mirror CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-tests:
+    name: Linux · Python and Git tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Show runtime versions
+        run: |
+          python3 --version
+          git --version
+
+      - name: Run offline test suite
+        run: python3 -B -m unittest discover -s . -p 'test_*.py' -v
+
+  windows-tests:
+    name: Windows · PowerShell 5.1, WinForms compile and tests
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Verify target PowerShell runtime
+        shell: powershell
+        run: |
+          $version = $PSVersionTable.PSVersion
+          Write-Host "Windows PowerShell $version"
+          if ($version.Major -ne 5 -or $version.Minor -ne 1) {
+            throw "Expected Windows PowerShell 5.1; got $version"
+          }
+
+      - name: Compile WinForms source with Windows PowerShell 5.1
+        shell: powershell
+        run: .\Test-MirrorWorkflowCompile.ps1
+
+      - name: Run offline test suite
+        shell: powershell
+        run: |
+          python -B -m unittest discover -s . -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  antivirus:
+    name: Antivirus · ClamAV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install ClamAV
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clamav clamav-freshclam
+
+      - name: Update malware definitions
+        run: |
+          sudo systemctl stop clamav-freshclam.service 2>/dev/null || true
+          sudo freshclam --stdout --verbose
+
+      - name: Scan tracked repository files
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          raw = subprocess.run(
+              ["git", "ls-files", "-z"], check=True, stdout=subprocess.PIPE
+          ).stdout
+          paths = ["./" + os.fsdecode(path) for path in raw.split(b"\0") if path]
+          if not paths:
+              raise SystemExit("No tracked files found; refusing an empty scan.")
+          result = subprocess.run(
+              ["clamscan", "--infected", "--no-summary", *paths], check=False
+          )
+          raise SystemExit(result.returncode)
+          PY
