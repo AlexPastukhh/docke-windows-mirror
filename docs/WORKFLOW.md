@@ -1,5 +1,14 @@
 # Mirror Workflow: поведение и безопасность
 
+Общий маршрут и цели принадлежат реестру контейнера (`/workspace/repo/README.md`
+→ `fortis-container/docs/use-cases/README.md`, UC-CONT-002–005). Этот документ
+владеет техническим Git/UI поведением, а контракт Gateway — политиками операций.
+Для AI в настроенном repo GitHub вызывается typed клиентом через Gateway;
+штатный ASK сразу отправляется в портал без предварительного разрешения в чате
+(UC-CONT-007). Существующие GUI dialogs/legacy Git actions не являются Gateway
+и не должны описываться как уже прошедшие его policy/approval.
+
+
 ## Docker → GitHub → Windows: branch-aware workflow inspector (new default)
 
 The standalone `Fortis-Windows-Mirror-Status.ps1` GUI loads
@@ -8,7 +17,90 @@ as historical/source reference, and `-Cli` still runs the old text-only
 `Mirror-Status.Report.ps1` (main-only). The new UI is **Windows PowerShell 5.1 / WinForms**,
 not JavaScript. It uses the Docker-first read-only exporter
 `tools/Export-Docker-Branch-Workflow.py` inside `fortis-repo-test`; keep that
-exporter in the Docker Git checkout. **Docker changes reach Windows only after Git push and a Windows pull.**
+exporter in the Docker Git checkout. **Target delivery is Docker task Worktree → GitHub PR/Actions → approved merge → Windows primary-clone pull of `main`. The current GUI does not yet enforce every gate; see the implementation status below.**
+
+## Canonical Docker directory layout: primary clones and task Worktrees
+
+For ordinary application repositories, use one primary clone and place every
+task Worktree under the matching repository folder. This is the canonical
+layout inside the persistent Fortis Repo workspace volume:
+
+```text
+/workspace/repo/
+├── Repos/
+│   ├── <repo>/                 # one primary clone; stays on main
+│   └── ...
+├── Worktrees/
+│   ├── <repo>/
+│   │   ├── <task>/             # linked Git Worktree for one task/branch
+│   │   └── ...
+│   └── ...
+└── Workfiles/
+```
+
+- Primary clone: `/workspace/repo/Repos/<repo>`. It is the stable repository
+  anchor and stays checked out on `main`. A primary clone found on another
+  branch is nonconforming and should be flagged; inspect its working tree
+  before any owner-controlled correction. Do not use it to switch among task
+  branches during ordinary feature development.
+- Task Worktree: `/workspace/repo/Worktrees/<repo>/<task>`. Create it with
+  `git worktree add` from the primary clone. It is a real linked Git working
+  tree: it shares the repository's Git object database and common metadata;
+  its `.git` entry is normally a file pointing into the primary clone's
+  `.git/worktrees/`, not a second independent clone.
+- The directory layout is a naming/organization convention, not proof of Git
+  membership. Git's authoritative inventory is
+  `git -C /workspace/repo/Repos/<repo> worktree list --porcelain`. A folder
+  that merely exists under `Worktrees/<repo>/` is not a registered Worktree.
+- Create the repository-specific Worktrees parent only when needed. Use a
+  unique, stable task slug for each Worktree directory. A branch can be
+  checked out in only one Worktree at a time; do not create a second checkout
+  of a branch that Git reports as already in use.
+- Before creating a task Worktree, inspect the primary clone's branch/status,
+  confirm it is on `main` and clean, fetch the intended base, confirm the
+  target path does not exist, and confirm the task branch name is available.
+  If the primary clone is dirty or on another branch, stop and review it; do
+  not stash or move its changes automatically. Example for a new branch based
+  on the current GitHub `main`:
+
+  ```bash
+  mkdir -p /workspace/repo/Worktrees/<repo>
+  git -C /workspace/repo/Repos/<repo> fetch origin
+  git -C /workspace/repo/Repos/<repo> worktree add \
+    -b <task-branch> \
+    /workspace/repo/Worktrees/<repo>/<task> \
+    origin/main
+  ```
+
+- Do not `git clone` a second repository into `Worktrees/`, do not create
+  standalone copies there, and do not use `git switch` in the primary clone
+  as a substitute for task Worktrees. Do not automatically prune or delete
+  Worktrees/branches after a PR; first verify the exact Worktree, branch,
+  working-tree status and whether another task still uses it.
+- AI edits, tests, stages, commits and pushes in the selected task Worktree.
+  The task branch goes to GitHub and is reviewed through its Pull Request and
+  configured Actions checks. Only after the PR is approved and merged should
+  Windows receive the updated `main`.
+- Windows keeps only its primary clone at
+  `%USERPROFILE%\Repos\<repo>`, on `main`. Do not create Windows task
+  Worktrees or pull an unmerged feature branch as part of the ordinary
+  application workflow. Windows is the verified receiver/observation
+  environment after the GitHub review and merge gate.
+
+**Implementation status / important limitation:** this folder convention is
+the target operating model, but the current Mirror GUI is not yet Worktree
+aware. Its repository inventory still enumerates primary clones under
+`/workspace/repo/Repos/`; its Stage/Commit/Push actions target the actual
+active Docker branch, not a separately selected Worktree. It does not yet
+enumerate nested Worktrees, route Git actions to a selected Worktree, or
+enforce PR approval/merge status before Windows updates. Until those features
+are implemented and verified, operate on a Worktree by its explicit path and
+do not assume the GUI's repository row or branch-view selector targets it.
+The existing active-branch switch controls are transitional capabilities, not
+the recommended feature-development workflow. This documentation update
+establishes the target convention only: it does not bulk-create Worktrees or
+move existing checkouts. Inventory and migrate any legacy Worktrees as a
+separate reviewed task.
 
 **Source of truth and screen:** the table enumerates Git repositories under
 Docker `/workspace/repo/Repos/` (not Windows folders), one row per repository.

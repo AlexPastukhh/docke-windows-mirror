@@ -1,5 +1,13 @@
 # docke-windows-mirror
 
+Общие сценарии Docker → GitHub → Actions → Windows ведутся в главном реестре
+контейнера: `/workspace/repo/README.md` → активный `fortis-container/docs/use-cases/README.md`.
+Начать с UC-CONT-002–005; здесь [WORKFLOW](docs/WORKFLOW.md) владеет точным
+поведением Mirror и его ограничениями. Предметные сценарии приложений ведутся
+в их собственных repo. Новая общая документация регистрируется через юзкейс,
+а процедуры и матрицы не копируются в отдельный реестр Mirror.
+
+
 Standalone Docker–Windows Mirror application.
 
 Canonical source for the independent Windows PowerShell 5.1 / WinForms interface for checking Docker,
