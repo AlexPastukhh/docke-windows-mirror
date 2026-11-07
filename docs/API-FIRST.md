@@ -11,6 +11,38 @@ This document owns the new service/frontend source usage and its current limits.
 - `mirror_api.pull`: Windows main-only fast-forward worker with exact SHA, trusted Docker origin, fresh Windows/GitHub preflight, fixed Git commands, readback and SQLite receipt. It is reachable only over a separately configured authenticated HTTPS Gateway listener. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
 - `fortis-approvals/integrations/mirror/extension.py`: typed `get_repository` (ALLOW) and `pull_main` (ASK). Pull preview binds an executed owner-approved GitHub merge request with CI evidence and the current remote main SHA; Core/WebAuthn authorization precedes effect. A source provider is not activated merely because it exists.
 
+## Browser UI — primary table + optional worktrees (2026-11-08 source candidate)
+
+The browser now preserves the **old WinForms presentation hierarchy**:
+
+1. The main screen is a dense **13-column, one-row-per-Docker-primary** table:
+   primary branch, GitHub comparison, Docker changes/SHA, Windows primary branch,
+   Windows/GitHub state, changes/SHA, workflow status and recommended action.
+   Task worktrees never become extra primary rows. Local refresh reads Docker
+   and Windows without triggering GitHub; targeted and all-repo checks update
+   individual rows without discarding completed results on cancellation.
+2. Selecting a primary row fills the lower **«Строка»** panel with all 13
+   *untruncated* field values, SHA and paths, separately labelled GitHub/Docker/
+   Windows main states and complete available changed-file lists. **«Копировать
+   весь блок»** copies the selected panel's whole text, not a summary.
+3. The lower **«Worktrees»** tab is **opt-in only** and lists the selected
+   repository's linked Docker task worktrees in a separate table. Selecting a
+   worktree displays its full Git metadata, changed files and matching PR/CI
+   evidence below that table. Switching tabs/rows does not run `git switch`.
+4. The primary table's branch-for-view fields intentionally show the actual
+   primary branch rather than offering a task-branch selector: task branches
+   are exclusively in the opt-in Worktrees tab. Ahead/behind are only shown
+   where the backend confirms Git ancestry; mismatching SHAs otherwise remain
+   `НАПРАВЛЕНИЕ НЕИЗВЕСТНО`.
+5. **Pull Windows remains disabled** until the owner-approved Gateway/Windows
+   operation is activated and end-to-end verified. Old WinForms Stage/Commit/
+   Push/switch must not be silently re-enabled or called from the browser.
+
+The JS behavior is covered by the dependency-free Node fixture in
+`tests/mirror_table_ui_smoke.js`; `test_mirror_table_ui.py` includes that smoke
+check in the existing Python unittest discovery/CI without editing workflow
+permissions. Owner still needs to review rendering on actual Windows/Chrome.
+
 ## First manual test on Windows **without merging into main**
 
 For expected results and a repeatable review checklist, see [MANUAL-PREVIEW](MANUAL-PREVIEW.md).
@@ -36,7 +68,7 @@ terminal must stay open while testing. Use **Ctrl+C** to stop. The temporary
 folder may be deleted after exit. Do not run `Start-MirrorAPI.ps1` from an
 unmatched Windows main clone or try to update that main to bypass delivery.
 
-Click **Проверить GitHub** to get PR/CI information. The accepted live native Gateway
+Click **«Проверить выбранный»** or **«Проверить все»** to get PR/CI information. The accepted live native Gateway
 uses `dynamicRepositories=true` with token-scoped access; check another repo
 individually and treat a missing Gateway read as unknown, not empty. Actions/CI observations do not equate to
 verified required-CI approval. GitHub metadata is never obtained using a Windows Git credential; do not add a PAT to Mirror.
