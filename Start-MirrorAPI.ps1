@@ -7,7 +7,8 @@ Does not install a service, open a firewall, activate Gateway, or pull Git.
 param(
     [string]$MirrorRoot = (Join-Path $env:USERPROFILE 'Repos'),
     [ValidateRange(1024, 65535)][int]$Port = 8765,
-    [string]$PreviewTask = ''
+    [string]$PreviewTask = '',
+    [switch]$OpenBrowser
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -30,6 +31,7 @@ if ($PreviewTask) {
     }
     $argsList += @('--preview-source-task', $PreviewTask)
 }
+if ($OpenBrowser) { $argsList += '--open-browser' }
 Push-Location -LiteralPath $project
 try {
     Write-Host 'Mirror browser API: loopback only. Copy the one-time URL printed below.'
