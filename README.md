@@ -29,7 +29,7 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 
 ## API-first browser source candidate (not yet installed)
 
-The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (registered repository scope only). Gateway read/Pull source adapters are in `fortis-approvals/integrations/mirror`; WebAuthn/TLS live installation is **pending**. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
+The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (live token-scoped multi-repo access). Gateway read/Pull source adapters are in `fortis-approvals/integrations/mirror`; WebAuthn/TLS live installation is **pending**. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
 
 ## Windows
 
@@ -45,21 +45,16 @@ Windows runtime requires `docker.exe`, `git.exe`, a running container called
 The launcher checks the Docker repo list on startup; GitHub and Windows
 checks happen only after clicking a check button.
 
-## Docker-only Stage, Commit, Push
+## GitHub publication and legacy compatibility
 
-Stage/Commit/Push run through `tools/Docker-Mirror-Git-Actions.py` inside
-the Docker container, not through Windows Git. Branch and HEAD are rechecked;
-Stage uses a reviewed selection, Commit uses the reviewed index, and Push
-requires confirmation and never uses force. There is no special repository
-blocklist: every valid Docker repository can use these actions, including
-`rd-graphs` and other infrastructure projects. Existing branch, origin,
-preview, freshness and owner-confirmation safeguards still apply.
-
-For GitHub HTTPS network operations, the Docker helper uses the persistent
-`/workspace/repo/.fortis-auth/git-credential-fortis-shared` instead of the
-temporary VS Code credential bridge. A repository must be granted access in
-the existing fine-grained PAT. No token is stored in this repository or
-passed on the command line. SSH-origin authentication remains separate.
+For this source candidate, **all GitHub network effects and reads run through the
+existing typed Fortis Gateway client**, with exact task/head preconditions and
+provider credentials confined to Gateway. Browser UI routes are **read-only**;
+there is no Stage/Commit/Push write endpoint or owner Git allowlist. The retained
+WinForms source and `tools/Docker-Mirror-Git-Actions.py` still support local
+stage/commit logic, but the helper fails closed on network GitHub fetch,
+`ls-remote` and push. Do not attempt to recover the old PAT helper as a bypass.
+See [WORKFLOW](docs/WORKFLOW.md) for the authorized handoff.
 
 ## Tests
 

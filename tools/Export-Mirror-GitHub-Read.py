@@ -2,7 +2,7 @@
 """Read only GitHub PR/Actions/check status through the authenticated Fortis Gateway.
 
 Docker Repo worker only. Never uses GitHub PAT/helper or action/owner routes.
-Current native Gateway registration is limited to its configured repository.
+The accepted dynamic native Gateway grants token-scoped repository reads.
 """
 import argparse
 import json
@@ -13,9 +13,20 @@ SOURCE = '/workspace/repo/Repos/fortis-approvals'
 if SOURCE not in sys.path:
     sys.path.insert(0, SOURCE)
 
-from fortis_approvals.workflow.client import WorkflowTransport
-from fortis_approvals.core import Denied
-from fortis_approvals.integrations.github.repo_client.client import GitHubClient
+try:
+    from fortis_approvals.workflow.client import WorkflowTransport
+    from fortis_approvals.core import Denied
+    from fortis_approvals.integrations.github.repo_client.client import GitHubClient
+except ModuleNotFoundError as missing:
+    if not missing.name or missing.name.split('.')[0] != 'fortis_approvals':
+        raise
+    # GitHub Actions checks this repository independently. Runtime still requires
+    # the installed Fortis Gateway typed client inside Docker; never fall back
+    # to direct network Git or provider credentials.
+    class Denied(Exception):
+        pass
+    WorkflowTransport = None
+    GitHubClient = None
 
 NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -23,6 +34,8 @@ MAX_PAGES = 4
 PAGE_SIZE = 30
 MAX_CHECK_HEADS = 10
 MAX_VERIFY_CLOSED = 25
+BRANCH_PAGE_SIZE = 100
+MAX_BRANCH_PAGES = 5
 
 
 def pages(fetch):
@@ -42,8 +55,35 @@ def pages(fetch):
 
 def collect(client, repo):
     results = dict(schema='fortis.github.mirror.v1', repoId=repo,
-                   pullRequests=None, workflowRuns=None, checkRuns={},
+                   head=None, branches={}, pullRequests=None, workflowRuns=None, checkRuns={},
                    errors={}, truncated={}, source='fortis-gateway')
+    # GitHub refs and main are read through the authenticated typed Gateway,
+    # never via a local Git credential/helper or Windows network connection.
+    try:
+        branches = {}
+        for page in range(1, MAX_BRANCH_PAGES + 1):
+            response = client.list_branches(repo, page=page, per_page=BRANCH_PAGE_SIZE)
+            if type(response) is not dict or type(response.get('items')) is not list:
+                raise ValueError('GATEWAY_BRANCH_RESPONSE_INVALID')
+            rows = response['items']
+            if len(rows) > BRANCH_PAGE_SIZE:
+                raise ValueError('GATEWAY_BRANCH_PAGE_INVALID')
+            for row in rows:
+                name, sha = row['name'], row['sha']
+                if (type(name) is not str or not name or len(name) > 200 or
+                        type(sha) is not str or not SHA.fullmatch(sha) or name in branches):
+                    raise ValueError('GATEWAY_BRANCH_INVALID')
+                branches[name] = sha
+            if len(rows) < BRANCH_PAGE_SIZE:
+                break
+        else:
+            results['truncated']['branches'] = True
+        results['branches'] = branches
+        results['head'] = branches.get('main')
+        if results['head'] is None:
+            results['errors']['branches'] = 'GATEWAY_MAIN_UNVERIFIED'
+    except (Denied, ValueError, TypeError, KeyError):
+        results['errors']['branches'] = 'GATEWAY_BRANCH_READ_UNAVAILABLE'
     try:
         pulls, limited = pages(lambda page: client.list_pull_requests(
             repo, state='all', page=page, per_page=PAGE_SIZE))
@@ -104,20 +144,25 @@ def collect(client, repo):
 
 
 def inspect(repo):
-    transport = WorkflowTransport(endpoint='https://host.docker.internal:19204',
-                                 allow_test_endpoint=True)
+    if WorkflowTransport is None or GitHubClient is None:
+        return dict(schema='fortis.github.mirror.v1', repoId=repo,
+                    head=None, branches={}, pullRequests=None, workflowRuns=None,
+                    checkRuns={}, errors={'gateway': 'GATEWAY_TYPED_CLIENT_MISSING'},
+                    truncated={}, source='fortis-gateway')
+    transport = WorkflowTransport(endpoint='https://host.docker.internal:19204')
     try:
-        # No attempt to extend scope: the installed native Gateway owns one repo.
         cap = transport.post('/v1/workspace/capabilities', {})
-        if cap.get('repository') != repo:
+        if cap.get('owner') != 'AlexPastukhh':
+            raise ValueError('GATEWAY_OWNER_MISMATCH')
+        if cap.get('dynamicRepositories') is not True and cap.get('repository') != repo:
             return dict(schema='fortis.github.mirror.v1', repoId=repo,
-                        pullRequests=None, workflowRuns=None, checkRuns={},
+                        head=None, branches={}, pullRequests=None, workflowRuns=None, checkRuns={},
                         errors={'scope':'GATEWAY_REPOSITORY_NOT_REGISTERED'},
                         truncated={}, source='fortis-gateway')
         return collect(GitHubClient(gateway=transport), repo)
     except (Denied, ValueError, KeyError, TypeError, OSError):
         return dict(schema='fortis.github.mirror.v1', repoId=repo,
-                    pullRequests=None, workflowRuns=None, checkRuns={},
+                    head=None, branches={}, pullRequests=None, workflowRuns=None, checkRuns={},
                     errors={'gateway':'GATEWAY_READ_UNAVAILABLE'},
                     truncated={}, source='fortis-gateway')
 

@@ -7,7 +7,6 @@ Does not install a service, open a firewall, activate Gateway, or pull Git.
 param(
     [string]$MirrorRoot = (Join-Path $env:USERPROFILE 'Repos'),
     [ValidateRange(1024, 65535)][int]$Port = 8765,
-    [string[]]$OwnerGitRepo = @(),
     [string]$PreviewTask = ''
 )
 Set-StrictMode -Version Latest
@@ -26,16 +25,10 @@ $null = (Get-Command docker.exe -CommandType Application -ErrorAction Stop)
 $argsList = @('-3', '-m', 'mirror_api.server', '--windows-root', $MirrorRoot,
                '--port', [string]$Port)
 if ($PreviewTask) {
-    if ($PreviewTask -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$' -or $OwnerGitRepo.Count -gt 0) {
+    if ($PreviewTask -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$') {
         throw 'MIRROR_PREVIEW_READONLY_REQUIRED'
     }
     $argsList += @('--preview-source-task', $PreviewTask)
-}
-foreach ($repo in $OwnerGitRepo) {
-    if ($repo -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}$') {
-        throw 'MIRROR_OWNER_GIT_REPO_INVALID'
-    }
-    $argsList += @('--owner-git-repo', $repo)
 }
 Push-Location -LiteralPath $project
 try {
