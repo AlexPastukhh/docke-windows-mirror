@@ -6,14 +6,59 @@ This document owns the new service/frontend source usage and its current limits.
 
 - `mirror_api.operations` reads Docker's **Git-registered** linked worktrees, Windows primary clones, and optional exact GitHub heads without a hidden Git fetch. Noncanonical worktrees remain visible, but are not eligible for native Gateway worktree mutations. An unknown status is never reported as clean/current.
 - `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. The browser endpoints are read-only; all POST/PUT/PATCH/DELETE requests are denied. No browser permission is inherited by the separate Gateway listener.
-- `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only PR metadata and Actions/Checks observations come from the **existing authenticated GitHub Gateway typed client**, invoked from the Docker Repo worker by `tools/Export-Mirror-GitHub-Read.py`. Per-repo branch SHAs also come from typed Gateway `list_branches`, never local `git ls-remote` or a Windows Git credential. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED` (only Gateway's merge policy owns the required workflow gate). Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
+- `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only PR metadata and Actions/Checks observations come from the **existing authenticated GitHub Gateway typed client**, invoked from the Docker Repo worker by `tools/Export-Mirror-GitHub-Read.py`. Per-repo branch SHAs also come from typed Gateway `list_branches`, never local `git ls-remote` or a Windows Git credential. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
+  the GitHub UI's required checks/reviews; the owner verifies those before manual Merge. Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
 - Browser Stage/Commit/Push write routes and their owner allowlist are **disabled**. The old WinForms helper remains for local source compatibility, but any network `ls-remote`/fetch/push is blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs must instead use the existing native typed Gateway client; the UI does not yet offer a write workflow.
 - `mirror_api.pull`: Windows main-only fast-forward worker with exact SHA, trusted Docker origin, fresh Windows/GitHub preflight, fixed Git commands, readback and SQLite receipt. It is reachable only over a separately configured authenticated HTTPS Gateway listener. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
-- Gateway-side Mirror provider — отдельный **не принятый в Gateway main**
-  source candidate `task/mirror-provider-20261107`, путь
-  `fortis_approvals/integrations/mirror/extension.py`. Наличие Windows API source
-  не включает provider. Точная граница и оставшаяся Gateway работа ведутся в
-  [Gateway backlog](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/BACKLOG-IMPROVEMENTS.md#согласование-нормального-ui-merge-с-последующими-операциями).
+- **Mirror-provider не является действующим Gateway provider:** его исходники
+  (`fortis_approvals/integrations/mirror/`) находятся как **untracked** файлы
+  только в `fortis-approvals` task worktree `task/mirror-provider-20261107`;
+  в принятом `fortis-approvals/main` этого каталога нет. Ни установка,
+  ни регистрация, ни TLS/Windows Pull acceptance этим не подтверждаются.
+  В текущем source candidate операция `pull_main` требует Gateway
+  `mergeRequestId` от `github.merge_pull_request` и **не совместима** с принятым
+  ручным Merge через GitHub UI. Для Docker main существует отдельная
+  работающая `workspace.update_main_from_pr`, но она не включает Windows Pull.
+  Provider следует отдельно переработать под проверенное owner UI merge
+  (точный PR HEAD/merge SHA/текущий GitHub main, CI и строгие Windows
+  preconditions), протестировать и принять через
+  [UC-GW-002](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/integrations.md#uc-gw-002)
+  и [UC-GW-005](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/releases.md#uc-gw-005).
+  До этого **не активировать** старую реализацию как Windows Pull provider.
+
+## Browser UI — primary table + optional worktrees (2026-11-08 source candidate)
+
+The browser now preserves the **old WinForms presentation hierarchy**:
+
+1. The main screen is a dense **13-column, one-row-per-Docker-primary** table:
+   primary branch, GitHub comparison, Docker changes/SHA, Windows primary branch,
+   Windows/GitHub state, changes/SHA, workflow status and recommended action.
+   Task worktrees never become extra primary rows. Local refresh reads Docker
+   and Windows without triggering GitHub; targeted and all-repo checks update
+   individual rows without discarding completed results on cancellation.
+2. Selecting a primary row fills the lower **«Строка»** panel with all 13
+   *untruncated* field values, SHA and paths, separately labelled GitHub/Docker/
+   Windows main states and complete available changed-file lists. **«Копировать
+   весь блок»** copies the selected panel's whole text, not a summary.
+3. The lower **«Worktrees»** tab is **opt-in only** and lists the selected
+   repository's linked Docker task worktrees in a separate table. Selecting a
+   worktree displays its full Git metadata, changed files and matching PR/CI
+   evidence below that table. Switching tabs/rows does not run `git switch`.
+4. The primary table's branch-for-view fields intentionally show the actual
+   primary branch rather than offering a task-branch selector: task branches
+   are exclusively in the opt-in Worktrees tab. Ahead/behind are only shown
+   where the backend confirms Git ancestry; mismatching SHAs otherwise remain
+   `НАПРАВЛЕНИЕ НЕИЗВЕСТНО`.
+5. **Pull Windows remains disabled** until the owner-approved Gateway/Windows
+   operation is activated and end-to-end verified. Old WinForms Stage/Commit/
+   Push/switch must not be silently re-enabled or called from the browser.
+
+The JS behavior is covered by the dependency-free Node fixture in
+`tests/mirror_table_ui_smoke.js`; `test_mirror_table_ui.py` includes that smoke
+check in the existing Python unittest discovery/CI without editing workflow
+permissions. Owner still needs to review rendering on actual Windows/Chrome.
+
+## First manual test on Windows **without merging into main**
 
 <a id="first-manual-test-on-windows-without-merging-into-main"></a>
 

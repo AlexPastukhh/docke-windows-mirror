@@ -1,4 +1,4 @@
-# Manual Windows browser preview — 2026-11-07
+# Manual Windows browser check — accepted main source
 
 Browser source is accepted in `main`. This page owns the repeatable read-only
 Windows check procedure; execution status and unfinished work are kept in the
@@ -40,7 +40,8 @@ Windows service. Do not share the bootstrap URL or browser cookie.
 
 - [ ] **Access:** loopback URL opens the browser UI; reusing an expired one-use bootstrap URL is denied; the UI does not require a public network port.
 - [ ] **Inventory:** all expected Docker primary repositories appear. In particular inspect `docke-windows-mirror` and `fortis-approvals`. An inaccessible Docker container is an error, **not** zero repositories.
-- [ ] **Worktrees:** select `docke-windows-mirror`; primary `main` and task/feature linked worktrees are listed distinctly, with branch, HEAD SHA, clean/dirty, changed files. Compare to Git data from the Docker container without modifying it:
+- [ ] **Main table / lower row:** only Docker **primary** repositories appear in the 13-column main table; choose `docke-windows-mirror` and the lower **«Строка»** tab. Check main Git/Docker/Windows state, full SHA, file changes; **«Копировать весь блок»** must copy all text.
+- [ ] **Worktrees:** choose the lower **«Worktrees»** tab for `docke-windows-mirror`; the separate table shows task/feature linked worktrees, not duplicate primary rows. Selecting a worktree shows exact branch, HEAD SHA, clean/dirty, changed files and PR/CI details below. Compare to Docker Git without modifying it:
 
   ```powershell
   docker exec fortis-repo-test git -C /workspace/repo/Repos/docke-windows-mirror worktree list --porcelain
@@ -57,8 +58,8 @@ Windows service. Do not share the bootstrap URL or browser cookie.
 
 - [ ] **PR/CI:** select `fortis-approvals` and click **Проверить выбранный**. Confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses show for matching task branch/SHA; links open github.com. `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
 - [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
-- [ ] **Refresh:** **Обновить локально** updates Docker/Windows status (and resets PR/CI to not checked); **Проверить GitHub** runs repo checks with progress and an option to cancel; existing results are retained when individual checks fail.
-- [ ] **Actions:** Pull and Git-changing buttons are disabled in the preview. No new PR/CI writes should exist.
+- [ ] **Refresh:** **«Обновить список»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use Gateway for remote checks and progressively update the table. **«Отмена проверки»** stops the remaining requests; already checked rows remain available.
+- [ ] **Actions:** **«Pull Windows»** is disabled pending owner-approved Gateway/Windows acceptance; Browser Stage/Commit/Push routes are absent. No GitHub writes occur from the browser.
 - [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories` and `/api/v1/repositories/<repo>?remote=true` return JSON. Direct requests without an authenticated browser session receive `401`.
 - [ ] **Shutdown:** Ctrl+C stops the service. Windows main remains on the same branch/HEAD and unchanged status; no Git write was performed.
 
