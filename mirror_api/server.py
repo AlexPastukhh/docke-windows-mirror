@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import secrets
 import threading
+import webbrowser
 from urllib.parse import parse_qs, urlsplit
 from .operations import Mirror, ObservationError, REPO, set_preview_source
 from .pull import PullWorker, PullDenied
@@ -272,10 +273,33 @@ def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, re
     server.socket = context.wrap_socket(server.socket, server_side=True)
     return server
 
+def open_local_browser(port, boot_token, *, opener=None, delay=0.4):
+    """Open only this process's loopback bootstrap URL, never external hosts.
+
+    The HTTP socket has been bound by MirrorServer; a short daemon timer gives
+    serve_forever time to accept the browser's initial session request. A
+    browser failure leaves the printed one-time URL available in the console.
+    """
+    url = f"http://127.0.0.1:{port}/session?boot={boot_token}"
+
+    def invoke():
+        try:
+            if not (opener or webbrowser.open)(url):
+                print("Browser did not open automatically; use the one-time URL above.", flush=True)
+        except Exception:
+            print("Browser did not open automatically; use the one-time URL above.", flush=True)
+
+    timer = threading.Timer(delay, invoke)
+    timer.daemon = True
+    timer.start()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--windows-root", default=str(Path.home() / "Repos"))
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--open-browser", action="store_true",
+                        help="Open the one-time 127.0.0.1 session URL in the default browser")
     parser.add_argument("--preview-source-task", default=None,
                         help="Read-only developer preview: use exporter sources in this Docker task worktree")
     parser.add_argument("--gateway-listen", action="store_true")
@@ -308,6 +332,8 @@ def main(argv=None):
             args.gateway_repo, args.gateway_receipt_db)
         threading.Thread(target=external.serve_forever, daemon=True).start()
     print(f"Open locally: http://127.0.0.1:{args.port}/session?boot={server.bootstrap_token}", flush=True)
+    if args.open_browser:
+        open_local_browser(server.server_port, server.bootstrap_token)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

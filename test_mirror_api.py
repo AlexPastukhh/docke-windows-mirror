@@ -8,7 +8,7 @@ import tempfile
 import threading
 import unittest
 from mirror_api.operations import Mirror, ObservationError, windows_status, relation_to_sha, evaluate_actions
-from mirror_api.server import MirrorServer
+from mirror_api.server import MirrorServer, open_local_browser
 
 
 class FakeMirror:
@@ -63,6 +63,35 @@ class APIClientTests(unittest.TestCase):
         self.assertTrue(capabilities['readOnly'])
         self.assertEqual([],capabilities['ownerGitRepos'])
         self.assertEqual(403, self.request("GET", "/session?boot=" + self.server.bootstrap_token + "x")[0])
+
+    def test_optional_open_browser_uses_only_loopback_bootstrap_url(self):
+        seen = []
+        delivered = threading.Event()
+
+        def opener(url):
+            seen.append(url)
+            delivered.set()
+            return True
+
+        open_local_browser(self.server.server_port, self.server.bootstrap_token,
+                           opener=opener, delay=0)
+        self.assertTrue(delivered.wait(2), "scheduled browser open was not called")
+        self.assertEqual([
+            f"http://127.0.0.1:{self.server.server_port}/session?boot={self.server.bootstrap_token}"
+        ], seen)
+        self.assertEqual(200, self.request("GET", "/api/v1/capabilities", self.login())[0])
+
+    def test_optional_open_browser_failure_leaves_session_valid(self):
+        delivered = threading.Event()
+
+        def broken(url):
+            delivered.set()
+            raise OSError("no browser")
+
+        open_local_browser(self.server.server_port, self.server.bootstrap_token,
+                           opener=broken, delay=0)
+        self.assertTrue(delivered.wait(2))
+        self.assertEqual(302, self.request("GET", "/session?boot=" + self.server.bootstrap_token)[0])
 
     def test_bootstrap_one_time(self):
         token = self.server.bootstrap_token

@@ -73,6 +73,13 @@ a prerequisite for normal delivery.
 
 ## Source-only local browser run
 
+When launched through the new `script-control-center/Fortis-Mirror-Browser.ps1`
+wrapper, `Start-MirrorAPI.ps1 -OpenBrowser` asks Python to open the **same
+one-use loopback session URL** in the Windows default browser. Normal direct
+launch continues to print the URL without opening a browser. If browser auto-
+open fails, the process remains running and the printed URL can be used manually.
+No new listener, GitHub write endpoint, Windows Pull, or service is enabled.
+
 The read-only browser process uses reviewed source from the Windows primary
 clone and matching accepted exporters in Docker. [MANUAL-PREVIEW](MANUAL-PREVIEW.md)
 owns the command and checklist; no second copy is maintained here. PR/CI/branch
