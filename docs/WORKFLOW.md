@@ -1,5 +1,7 @@
 # Mirror Workflow: поведение и безопасность
 
+<a id="canonical-docker-directory-layout-primary-clones-and-task-worktrees"></a>
+
 ## Актуальная схема: Docker task → Gateway → GitHub → Windows main
 
 Для обычных проектов Docker primary находится в `/workspace/repo/Repos/<repo>`
@@ -71,9 +73,10 @@ untracked изменения в `Repos/<repo>`. Edit/test/stage/commit — то�
 не установленная Windows-версия. SHA веток и PR/CI теперь читаются через
 Gateway (при отсутствии scope — unknown), а Browser UI не содержит доступных
 Git write routes. Legacy Docker Git helper не выполняет сетевые операции
-к GitHub. Обязательный CI и разрешение merge остаются у Gateway;
-Windows listener/ASK Pull всё ещё MANUAL-PENDING. Следующая проверка —
-ручной запуск на реальной Windows по API-FIRST.
+к GitHub. Native machine merge имеет отдельный Gateway CI gate; при обычном
+owner UI merge required checks/review задаются GitHub и проверяются владельцем.
+Граница доступного source — [API-FIRST](API-FIRST.md), незавершённое внедрение
+и проверки — [единый backlog](BACKLOG-IMPROVEMENTS.md).
 
 ## Предыдущий WinForms Mirror: описание существующего кода, не инструкция для Gateway-only публикации
 

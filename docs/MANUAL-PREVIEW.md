@@ -1,26 +1,47 @@
-# Manual Windows browser preview — 2026-11-07
+# Manual Windows browser check — accepted main source
 
-Status: **MANUAL-PENDING**. Source-only task worktree; not merged, installed as service, or released.
+Browser source is accepted in `main`. This page owns the repeatable read-only
+Windows check procedure; execution status and unfinished work are kept in the
+[backlog](BACKLOG-IMPROVEMENTS.md), not a second checklist of project tasks here.
 
 ## Preconditions
 
-Windows PowerShell 5.1, Docker CLI/Desktop, running container `fortis-repo-test` with current Mirror task worktree available, Windows `git.exe`, Python launcher `py.exe` running Python >=3.9. No elevated PowerShell, new credentials, Git reset, branch switch, commit, merge, pull or Gateway deployment is required. Do not enable owner-Git grants or the Gateway listener for this preview.
+Use Windows PowerShell 5.1, Python >=3.9 (`py -3`), Git/Docker CLI and running
+`fortis-repo-test`. First deliver the approved merged source to the clean Windows
+primary clone by UC-CONT-005; Docker main must include the matching inventory
+and Gateway READ exporters. Source delivery is separate from runtime acceptance.
+Do not add credentials, owner-Git grants or a Gateway listener for this read-only
+browser check. The retained `Open-MirrorPreview.ps1` bootstrap uses an old task
+path; ordinary startup uses accepted main and does not depend on that worktree.
 
 ## Start
 
+From the reviewed Windows clone:
+
 ```powershell
-$bootstrap = Join-Path $env:TEMP 'Open-MirrorPreview.ps1'
-docker cp 'fortis-repo-test:/workspace/repo/Worktrees/docke-windows-mirror/mirror-gateway-ci-20261107/Open-MirrorPreview.ps1' $bootstrap
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap
+& {
+    $ErrorActionPreference = 'Stop'
+    $repo = Join-Path $HOME 'Repos\docke-windows-mirror'
+    $launcher = Join-Path $repo 'Start-MirrorAPI.ps1'
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        throw 'MIRROR_ACCEPTED_SOURCE_REQUIRED'
+    }
+    & $launcher -MirrorRoot (Join-Path $HOME 'Repos')
+}
 ```
 
-This script checks tools and Docker container state, then `docker cp`s the *current task-source* `mirror_api` and `Start-MirrorAPI.ps1` into a unique `%TEMP%/Fortis-Mirror-Preview-*` folder; the service reads Docker exporter and Gateway-reader scripts from the Docker **task** worktree. The preview service binds to `127.0.0.1:8765`, offers a one-use URL in the console and reads Windows `%USERPROFILE%/Repos` without Git mutation. Keep terminal running, paste the URL into the Windows browser. Ctrl+C stops the process. A new run creates another temporary folder and link. The displayed directory can be deleted after stopping.
+The process serves a read-only browser UI on loopback and prints a one-use URL.
+Keep the terminal open, use the URL in the owner's Windows browser, stop with
+Ctrl+C. It reads Windows clone state without a Git write; source pull/installation
+is not performed by this command. The service is temporary, not an installed
+Windows service. Do not share the bootstrap URL or browser cookie.
 
 ## Checklist to record PASS/FAIL + exact mismatch
 
 - [ ] **Access:** loopback URL opens the browser UI; reusing an expired one-use bootstrap URL is denied; the UI does not require a public network port.
 - [ ] **Inventory:** all expected Docker primary repositories appear. In particular inspect `docke-windows-mirror` and `fortis-approvals`. An inaccessible Docker container is an error, **not** zero repositories.
-- [ ] **Worktrees:** select `docke-windows-mirror`; primary `main` and task/feature linked worktrees are listed distinctly, with branch, HEAD SHA, clean/dirty, changed files. Compare to Git data from the Docker container without modifying it:
+- [ ] **Main table / lower row:** only Docker **primary** repositories appear in the 13-column main table; choose `docke-windows-mirror` and the lower **«Строка»** tab. Check main Git/Docker/Windows state, full SHA, file changes; **«Копировать весь блок»** must copy all text.
+- [ ] **Worktrees:** choose the lower **«Worktrees»** tab for `docke-windows-mirror`; the separate table shows task/feature linked worktrees, not duplicate primary rows. Selecting a worktree shows exact branch, HEAD SHA, clean/dirty, changed files and PR/CI details below. Compare to Docker Git without modifying it:
 
   ```powershell
   docker exec fortis-repo-test git -C /workspace/repo/Repos/docke-windows-mirror worktree list --porcelain
@@ -37,16 +58,20 @@ This script checks tools and Docker container state, then `docker cp`s the *curr
 
 - [ ] **PR/CI:** select `fortis-approvals` and click **Проверить выбранный**. Confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses show for matching task branch/SHA; links open github.com. `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
 - [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
-- [ ] **Refresh:** **Обновить локально** updates Docker/Windows status (and resets PR/CI to not checked); **Проверить GitHub** runs repo checks with progress and an option to cancel; existing results are retained when individual checks fail.
-- [ ] **Actions:** Pull and Git-changing buttons are disabled in the preview. No new PR/CI writes should exist.
+- [ ] **Refresh:** **«Обновить список»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use Gateway for remote checks and progressively update the table. **«Отмена проверки»** stops the remaining requests; already checked rows remain available.
+- [ ] **Actions:** **«Pull Windows»** is disabled pending owner-approved Gateway/Windows acceptance; Browser Stage/Commit/Push routes are absent. No GitHub writes occur from the browser.
 - [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories` and `/api/v1/repositories/<repo>?remote=true` return JSON. Direct requests without an authenticated browser session receive `401`.
 - [ ] **Shutdown:** Ctrl+C stops the service. Windows main remains on the same branch/HEAD and unchanged status; no Git write was performed.
 
-## Known limits / diagnostics
+<a id="known-limits--diagnostics"></a>
 
-- Live Windows execution of the candidate is not yet verified; Python/PowerShell startup, Docker Desktop connectivity and Gateway scope/credentials can fail. Report the **exact error code or screenshot**, the selected repo/branch and what you expected; **do not share** the one-time URL token, cookies, machine grants or any other credentials.
-- PR/CI and branch reads use the existing native Primary Gateway with its **active token-scoped dynamic repository support**. The reader never uses a Repo GitHub token fallback. A successful repo read does not prove write authorization. A temporary inability to access Gateway is a valid `GATEWAY_READ_UNAVAILABLE` error, not missing PRs.
-- The view shows observed CI runs for an exact PR head and latest attempt per workflow. It does not claim all required checks passed or make PR/CI mutations.
-- Pull, Windows API Gateway TLS, full WebAuthn E2E and permanent Windows service installation are separate MANUAL-PENDING tasks. Do not infer they are working from this preview.
+## Diagnostics and status ownership
+
+For an error, record the exact code, selected repo/branch and expected result;
+do not share URL tokens, cookies, machine grants or provider credentials.
+Gateway read failure means UNKNOWN, not zero PRs or empty CI. Visible workflow
+runs are observations for the selected SHA, not certified required-CI approval.
+Read-only preview does not authorize Pull or provider activation. Actual pending
+acceptance and feature gaps are owned only by the [backlog](BACKLOG-IMPROVEMENTS.md).
 
 Detailed source architecture: [API-FIRST](API-FIRST.md).
