@@ -58,6 +58,16 @@ Optional listener requires a private Windows TLS key/cert, a 32+-character rando
 
 The shared Gateway Extension `JSONAPI` supports fixed HTTPS on port 443 with system-trusted certificate. No insecure fallback, direct AI-to-Windows bypass, arbitrary origin/port or token in caller payload is supported. Gateway config initially should contain the read operation only; add ASK Pull only after the owner confirms TLS/client identity, durable receipt behavior, exact approved merge evidence, Windows Git auth, and real fast-forward/reject/replay tests. Use the existing `Manage-Integrations.ps1` release controller; never redeploy Production as part of source testing.
 
+## GitHub Actions source checks
+
+`.github/workflows/mirror-source-ci.yml` provides source-only Python offline
+regression and Node syntax checks. It does not install Windows or enable the
+Gateway Pull listener. Publishing changes beneath `.github/workflows` uses
+`github.push_commits` through native Gateway **ASK** and requires owner WebAuthn;
+local tests and an open PR do not by themselves satisfy branch-required checks.
+The test suite runs independently of the private Fortis Gateway repo; the actual
+runtime reader still fails closed if the typed client is unavailable.
+
 ## Checks / outstanding acceptance
 
 Run `python3 -B -m unittest -q test_mirror_pr_ci test_mirror_api test_mirror_worktrees test_mirror_docker_actions test_mirror_workflow_source test_mirror_git_history test_mirror_status_source` from the Mirror worktree. The Gateway provider tests are under `fortis_approvals/integrations/mirror/tests`. Offline tests cannot prove Windows Git/NTFS, WinForms retirement, TLS trust, owner WebAuthn or actual Gateway↔Windows execution. Repo-side **read-only** native Gateway→GitHub branches/PR/CI were checked on 2026-11-07 for `docke-windows-mirror`; it is not Windows browser acceptance. Other repositories depend on current token-scoped Gateway read permissions. Manual owner acceptance and source delivery/activation are required. The current Web UI now displays **read-only** PR/CI for Gateway-supported repo scope; it does not provide PR creation, Ready, CI dispatch/rerun/cancel, merge, direct GUI submission of Gateway ASK, a Windows service installer, or full production onboarding. Those are blockers for declaring the complete specification delivered.

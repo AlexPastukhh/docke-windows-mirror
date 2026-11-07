@@ -13,9 +13,20 @@ SOURCE = '/workspace/repo/Repos/fortis-approvals'
 if SOURCE not in sys.path:
     sys.path.insert(0, SOURCE)
 
-from fortis_approvals.workflow.client import WorkflowTransport
-from fortis_approvals.core import Denied
-from fortis_approvals.integrations.github.repo_client.client import GitHubClient
+try:
+    from fortis_approvals.workflow.client import WorkflowTransport
+    from fortis_approvals.core import Denied
+    from fortis_approvals.integrations.github.repo_client.client import GitHubClient
+except ModuleNotFoundError as missing:
+    if not missing.name or missing.name.split('.')[0] != 'fortis_approvals':
+        raise
+    # GitHub Actions checks this repository independently. Runtime still requires
+    # the installed Fortis Gateway typed client inside Docker; never fall back
+    # to direct network Git or provider credentials.
+    class Denied(Exception):
+        pass
+    WorkflowTransport = None
+    GitHubClient = None
 
 NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -133,6 +144,11 @@ def collect(client, repo):
 
 
 def inspect(repo):
+    if WorkflowTransport is None or GitHubClient is None:
+        return dict(schema='fortis.github.mirror.v1', repoId=repo,
+                    head=None, branches={}, pullRequests=None, workflowRuns=None,
+                    checkRuns={}, errors={'gateway': 'GATEWAY_TYPED_CLIENT_MISSING'},
+                    truncated={}, source='fortis-gateway')
     transport = WorkflowTransport(endpoint='https://host.docker.internal:19204')
     try:
         cap = transport.post('/v1/workspace/capabilities', {})

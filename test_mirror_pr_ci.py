@@ -147,7 +147,7 @@ class ClosedPRVerificationTests(unittest.TestCase):
         self.assertEqual('MERGED',pr['status'])
 
     def test_unavailable_details_stays_uncertain(self):
-        from fortis_approvals.core import Denied
+        Denied=reader.Denied
         row={**pull(), 'state':'closed', 'merged':False}
         class Client:
             def list_branches(self,repo,*,page,per_page):
@@ -189,10 +189,28 @@ class DynamicGatewayTests(unittest.TestCase):
         self.assertEqual(SHA1,data['head'])
         self.assertEqual({},data['errors'])
 
+    def test_ci_checkout_without_gateway_package_stays_readonly_unknown(self):
+        import builtins
+        original_import=builtins.__import__
+        def absent_fortis(name,*args,**kwargs):
+            if name.startswith('fortis_approvals'):
+                raise ModuleNotFoundError(name=name)
+            return original_import(name,*args,**kwargs)
+        spec=importlib.util.spec_from_file_location(
+            'mirror_reader_no_gateway_for_test',SOURCE)
+        isolated=importlib.util.module_from_spec(spec)
+        with mock.patch('builtins.__import__',side_effect=absent_fortis):
+            spec.loader.exec_module(isolated)
+        self.assertIsNone(isolated.WorkflowTransport)
+        self.assertIsNone(isolated.GitHubClient)
+        result=isolated.inspect('docke-windows-mirror')
+        self.assertEqual('GATEWAY_TYPED_CLIENT_MISSING',result['errors']['gateway'])
+        self.assertIsNone(result['head'])
+
     def test_missing_branch_read_is_unknown_not_empty_clean(self):
         class Client:
             def list_branches(self,repo,*,page,per_page):
-                from fortis_approvals.core import Denied
+                Denied=reader.Denied
                 raise Denied('SCOPE_DENIED')
             def list_pull_requests(self,repo,*,state,page,per_page):
                 return {'items':[]}
