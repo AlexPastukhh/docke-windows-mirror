@@ -9,6 +9,7 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import os
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -54,6 +55,79 @@ def git(repo, *args):
         return p.stdout.decode("utf-8", errors="replace").rstrip("\r\n") if p.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+
+def inventory_worktrees(root, name):
+    """Git-authoritative inventory including noncanonical existing worktrees."""
+    primary = safe_repo(root, name)
+    if primary is None:
+        raise ValueError("unsafe or missing primary")
+    raw = git(primary, "worktree", "list", "--porcelain", "-z")
+    if raw is None:
+        raise ValueError("worktree inventory unavailable")
+    parent = (root.parent / "Worktrees" / name).resolve()
+    result = []
+    for record in raw.split("\0\0"):
+        if not record:
+            continue
+        attrs = {}
+        for item in record.split("\0"):
+            key, _, value = item.partition(" ")
+            attrs[key] = value
+        value = attrs.get("worktree", "")
+        location = Path(value)
+        primary_row = location == primary.resolve()
+        branch = attrs.get("branch", "").removeprefix("refs/heads/")
+        head = attrs.get("HEAD", "")
+        state = ("prunable" if "prunable" in attrs else
+                 "locked" if "locked" in attrs else
+                 "bare" if "bare" in attrs else "registered")
+        canonical = (not primary_row and location.is_absolute() and
+                     not location.is_symlink() and location.parent == parent and
+                     bool(NAME.fullmatch(location.name)) and location.is_dir() and
+                     (location / ".git").is_file() and
+                     not (location / ".git").is_symlink())
+        if canonical:
+            common = git(location, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            top = git(location, "rev-parse", "--show-toplevel")
+            canonical = (common is not None and
+                         Path(common).resolve() == (primary / ".git").resolve() and
+                         top == str(location))
+        eligible = state == "registered" and (primary_row or canonical)
+        task = None if primary_row else (location.name if canonical else None)
+        status = git(location, "status", "--porcelain=v1", "--untracked-files=all") if eligible else None
+        origin = git(location, "remote", "get-url", "origin") if eligible else None
+        result.append(dict(repoId=name, task=task, path=value,
+                           kind="primary" if primary_row else "worktree",
+                           branch=branch if valid_branch(branch) else None,
+                           head=head if SHA.fullmatch(head) else None,
+                           clean=None if status is None else not bool(status),
+                           changed=None if status is None else len(status.splitlines()),
+                           changedFiles=[] if status is None else status.splitlines()[:200],
+                           changedTruncated=status is not None and len(status.splitlines()) > 200,
+                           origin=origin if origin and ORIGIN.fullmatch(origin) else None,
+                           registered=True, targetEligible=eligible,
+                           status=state if eligible else "unsupported_" + state))
+    if not any(x["kind"] == "primary" and x["targetEligible"] for x in result):
+        raise ValueError("primary worktree missing from Git inventory")
+    return result
+
+
+def exact_target(root, name, task):
+    if task is None:
+        repo = safe_repo(root, name)
+        if repo is None:
+            raise ValueError("unsafe primary repository")
+        return repo
+    if not NAME.fullmatch(task):
+        raise ValueError("invalid task")
+    rows = inventory_worktrees(root, name)
+    matches = [x for x in rows if x["task"] == task and
+               x["kind"] == "worktree" and x["targetEligible"]]
+    if len(matches) != 1:
+        raise ValueError("selected task is not a registered canonical worktree")
+    return Path(matches[0]["path"])
 
 
 def snapshot_one(repo):
@@ -177,6 +251,7 @@ def main():
     parser.add_argument("--stdout", action="store_true")
     parser.add_argument("--repo", nargs="+", default=None)
     parser.add_argument("--compare", action="append", nargs=3, metavar=("REPO", "BRANCH", "GH_SHA"))
+    parser.add_argument("--inventory-json", action="store_true")
     parser.add_argument("--switch-repo")
     parser.add_argument("--switch-branch")
     parser.add_argument("--expect-branch")
@@ -192,6 +267,14 @@ def main():
             print(guarded_switch(args.root, *switch_values))
         except ValueError as e:
             parser.exit(2, "STOP: " + str(e) + "\n")
+        return
+    if args.inventory_json:
+        if args.compare or args.stdout:
+            parser.error("inventory is a separate read-only operation")
+        names = args.repo or [x.name for x in args.root.iterdir() if safe_repo(args.root, x.name)]
+        print(json.dumps(dict(schema="fortis.docker.worktrees.v1",
+            repositories={name: inventory_worktrees(args.root, name) for name in names}),
+            ensure_ascii=False, sort_keys=True))
         return
     if not args.stdout:
         parser.error("snapshot output requires --stdout")
