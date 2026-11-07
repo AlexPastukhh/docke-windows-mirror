@@ -63,8 +63,8 @@ def git_result(repo, args, *, write=False, timeout=45):
     return result.stdout
 
 
-def exact_repo(root, name):
-    repo = mirror.safe_repo(root, name)
+def exact_repo(root, name, task=None):
+    repo = mirror.exact_target(root, name, task)
     if repo is None:
         raise ValueError("Docker repository is missing or unsafe")
     origin = mirror.git(repo, "remote", "get-url", "origin")
@@ -146,8 +146,8 @@ def status_entries(repo):
     return token, entries
 
 
-def stage_preview(root, name):
-    repo = exact_repo(root, name)
+def stage_preview(root, name, task=None):
+    repo = exact_repo(root, name, task)
     branch, head = identity(repo)
     token, entries = status_entries(repo)
     if len(entries) > 500:
@@ -160,8 +160,8 @@ def stage_preview(root, name):
     return "\n".join(lines)
 
 
-def stage(root, name, branch, head, token, indices):
-    repo = exact_repo(root, name)
+def stage(root, name, branch, head, token, indices, task=None):
+    repo = exact_repo(root, name, task)
     checked(repo, branch, head)
     current, entries = status_entries(repo)
     if not DIGEST.fullmatch(token) or current != token:
@@ -216,8 +216,8 @@ def staged_manifest(repo):
     return token, files
 
 
-def commit_preview(root, name):
-    repo = exact_repo(root, name)
+def commit_preview(root, name, task=None):
+    repo = exact_repo(root, name, task)
     branch, head = identity(repo)
     token, files = staged_manifest(repo)
     if len(files) > 500:
@@ -229,8 +229,8 @@ def commit_preview(root, name):
     return "\n".join(lines)
 
 
-def commit(root, name, branch, head, staged_hash, msg_b64):
-    repo = exact_repo(root, name)
+def commit(root, name, branch, head, staged_hash, msg_b64, task=None):
+    repo = exact_repo(root, name, task)
     checked(repo, branch, head)
     if not DIGEST.fullmatch(staged_hash):
         raise ValueError("invalid staged manifest digest")
@@ -268,15 +268,15 @@ def remote_sha(repo, branch):
     return parts[0]
 
 
-def push_preview(root, name):
-    repo = exact_repo(root, name)
+def push_preview(root, name, task=None):
+    repo = exact_repo(root, name, task)
     branch, head = identity(repo)
     remote = remote_sha(repo, branch)
     return "FORTIS_DOCKER_PUSH_V1\t{}\t{}\t{}".format(branch, head, remote)
 
 
-def push(root, name, branch, head, previous_remote):
-    repo = exact_repo(root, name)
+def push(root, name, branch, head, previous_remote, task=None):
+    repo = exact_repo(root, name, task)
     checked(repo, branch, head)
     if not SHA.fullmatch(previous_remote):
         raise ValueError("invalid expected GitHub SHA")
@@ -297,6 +297,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--task", help="Exact registered task worktree slug; default primary")
     group = parser.add_mutually_exclusive_group(required=True)
     for operation in ("stage-preview", "stage", "commit-preview", "commit",
                       "push-preview", "push"):
@@ -310,13 +311,15 @@ def main():
     args = parser.parse_args()
     if not mirror.NAME.fullmatch(args.repo):
         parser.error("invalid repo")
+    if args.task is not None and not mirror.NAME.fullmatch(args.task):
+        parser.error("invalid task")
     try:
         if args.stage_preview:
-            print(stage_preview(args.root, args.repo))
+            print(stage_preview(args.root, args.repo, args.task))
         elif args.commit_preview:
-            print(commit_preview(args.root, args.repo))
+            print(commit_preview(args.root, args.repo, args.task))
         elif args.push_preview:
-            print(push_preview(args.root, args.repo))
+            print(push_preview(args.root, args.repo, args.task))
         else:
             if (not args.expect_branch or not args.expect_head or
                     not mirror.valid_branch(args.expect_branch) or
@@ -328,17 +331,17 @@ def main():
                     raise ValueError("invalid selected file positions")
                 positions = [int(x) for x in args.indices.split(",")]
                 print(stage(args.root, args.repo, args.expect_branch,
-                            args.expect_head, args.expect_digest, positions))
+                            args.expect_head, args.expect_digest, positions, args.task))
             elif args.commit:
                 if not args.expect_digest or not args.message_b64:
                     raise ValueError("commit requires digest and message")
                 print(commit(args.root, args.repo, args.expect_branch,
-                             args.expect_head, args.expect_digest, args.message_b64))
+                             args.expect_head, args.expect_digest, args.message_b64, args.task))
             elif args.push:
                 if not args.expect_remote:
                     raise ValueError("push requires previous GitHub SHA")
                 print(push(args.root, args.repo, args.expect_branch,
-                           args.expect_head, args.expect_remote))
+                           args.expect_head, args.expect_remote, args.task))
     except ValueError as e:
         parser.exit(2, "STOP: " + str(e) + "\n")
 

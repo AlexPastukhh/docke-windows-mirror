@@ -27,6 +27,10 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 
 [Detailed Mirror workflow and security behavior](docs/WORKFLOW.md).
 
+## API-first browser source candidate (not yet installed)
+
+The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (registered repository scope only). Gateway read/Pull source adapters are in `fortis-approvals/integrations/mirror`; WebAuthn/TLS live installation is **pending**. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
+
 ## Windows
 
 From the Windows clone in PowerShell 5.1:
