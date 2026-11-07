@@ -1,6 +1,69 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fortis Mirror</title><link rel="stylesheet" href="/style.css"></head>
-<body><header><div><small>FORTIS / MIRROR</small><h1>Docker → GitHub → Windows</h1><p>Рабочие деревья, состояние main и доступные действия</p></div><div class="tools"><button id="local">Обновить локально</button><button id="selected-remote">Проверить выбранный</button><button id="remote">Проверить GitHub</button><button id="cancel" disabled>Отменить проверку</button></div></header>
-<main><div id="banner" role="status">Загрузка состояния…</div><section class="summary" id="summary"></section><div class="workspace"><aside><h2>Репозитории</h2><div id="repos"></div></aside><article id="details"><p>Выберите репозиторий.</p></article></div></main>
-<script src="/app.js" defer></script></body></html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fortis — Docker → GitHub → Windows</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Docker → GitHub → Windows <span>· репозитории из Docker</span></h1>
+    <div class="toolbar" role="toolbar" aria-label="Проверки репозиториев">
+      <button id="selected-remote">Проверить выбранный</button>
+      <button id="remote">Проверить все</button>
+      <button id="local">Обновить список</button>
+      <button id="pull-windows" disabled title="Windows Pull из Browser UI пока не подключён к owner-approved Gateway backend">Pull Windows</button>
+      <button id="cancel" disabled>Отмена проверки</button>
+    </div>
+  </header>
+  <main>
+    <div class="table-title">
+      <strong>Основные репозитории</strong>
+      <span>Одна строка на Docker primary · task worktrees только в нижней вкладке</span>
+      <span id="count" class="count"></span>
+    </div>
+    <div class="table-scroll" id="main-scroll" role="region" aria-label="Таблица основных репозиториев" tabindex="0">
+      <table class="main-table" id="main-table">
+        <thead><tr>
+          <th>Репозиторий</th>
+          <th>Docker · Ветка для просмотра</th>
+          <th>Docker · Активная ветка</th>
+          <th>Docker · GitHub</th>
+          <th>Docker · Изменения</th>
+          <th>Docker · SHA</th>
+          <th>Windows · Ветка для просмотра</th>
+          <th>Windows · Активная ветка</th>
+          <th>Windows · GitHub</th>
+          <th>Windows · Изменения</th>
+          <th>Windows · SHA</th>
+          <th>Workflow · Итог</th>
+          <th>Workflow · Действие</th>
+        </tr></thead>
+        <tbody id="primary-rows"></tbody>
+      </table>
+    </div>
+    <div id="banner" role="status" aria-live="polite">Загрузка репозиториев…</div>
+    <div class="detail-toolbar" role="tablist" aria-label="Сведения о выбранном репозитории">
+      <button id="tab-row" role="tab" aria-selected="true" aria-controls="panel-row" class="active">Строка</button>
+      <button id="tab-worktrees" role="tab" aria-selected="false" aria-controls="panel-worktrees">Worktrees</button>
+      <span id="selection-title" class="selection-title">Выберите репозиторий</span>
+      <button id="copy-details" class="copy-button">Копировать весь блок</button>
+    </div>
+    <section id="panel-row" role="tabpanel" aria-labelledby="tab-row" class="detail-panel">
+      <pre id="row-full" class="detail-text" tabindex="0"></pre>
+    </section>
+    <section id="panel-worktrees" role="tabpanel" aria-labelledby="tab-worktrees" class="detail-panel" hidden>
+      <p class="worktree-note">Только зарегистрированные Docker linked worktrees выбранного репозитория. Основной clone показан в верхней таблице. Выбор строки ничего не переключает в Git.</p>
+      <div class="worktree-scroll" role="region" aria-label="Таблица Docker worktrees" tabindex="0">
+        <table class="worktree-table">
+          <thead><tr><th>Ветка</th><th>HEAD</th><th>GitHub SHA</th><th>GitHub</th><th>Изменения</th><th>PR</th><th>CI</th><th>Путь</th></tr></thead>
+          <tbody id="worktree-rows"></tbody>
+        </table>
+      </div>
+      <pre id="worktree-full" class="detail-text worktree-details" tabindex="0"></pre>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

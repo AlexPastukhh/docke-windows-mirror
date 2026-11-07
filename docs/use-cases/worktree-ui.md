@@ -8,8 +8,11 @@
 
 **Как:** сверить [WORKFLOW](../WORKFLOW.md),
 [Docker exporter](../../tools/Export-Docker-Branch-Workflow.py),
-`git worktree list --porcelain` и [API-FIRST](../API-FIRST.md). Сохранённый
-WinForms UI и API-first source candidate имеют разные ограничения; наличие
+`git worktree list --porcelain` и [API-FIRST](../API-FIRST.md). В Browser UI основная таблица показывает **только Docker primary**;
+вкладка «Строка» ниже таблицы показывает все 13 полей и полный копируемый
+текст, а вкладка «Worktrees» по запросу показывает отдельную таблицу linked
+worktrees выбранного репозитория (сведения PR/CI относятся к точному SHA).
+Сохранённый WinForms UI и API-first source candidate имеют разные ограничения; наличие
 inventory в source не доказывает установку Windows API. Не создавать Windows task worktrees для обычных проектов.
 
 **Готово:** идентичность цели доказана, либо UI явно не поддерживает действие.
