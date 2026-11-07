@@ -37,17 +37,27 @@ owner deployment records и условий cleanup.
    Не считать успешный GitHub read достаточным разрешением на запись. Live
    capabilities и реальный token scope проверяются отдельно для каждого repo;
    при DENY/403/unknown остановиться, а не переходить на альтернативный клиент.
-4. Создать PR через typed Gateway, проверить обязательные GitHub Actions/statuses
-   **для точного PR HEAD**. `ASK` можно отправлять без отдельного вопроса в
-   чате, но исполнение требует подтверждения владельца через Owner Portal
-   (WebAuthn). Не выполнять merge по просто последнему зелёному запуску.
-   В случае `UNCERTAIN` сначала status/reconcile по прежнему requestId.
-5. После подтверждённого merge обновить чистый Docker `main` до одобренного
-   SHA через Gateway `workspace.update_main`. Затем выполнить охраняемый
-   Windows `main` pull: проверить точный origin, HEAD, ветку, чистоту,
-   fast-forward ancestry, pin SHA и readback; никаких reset/stash/force.
-   Изменение исходников **не** означает сборку image, deploy или перезапуск
-   работающих сервисов: это отдельный owner-controlled процесс.
+4. Создать PR через typed Gateway и проверить обязательные CI/statuses для
+   **точного PR HEAD**. Передать владельцу GitHub URL; владелец сливает PR
+   через GitHub UI. **AI не вызывает `merge_pull_request` и не создаёт merge ASK.**
+   Другие необходимые ASK в порученной задаче отправляются без дополнительного
+   вопроса в чате; эффект требует Owner Portal/WebAuthn.
+   При `UNCERTAIN` сначала status/reconcile по прежнему requestId.
+5. После owner UI merge проверить merged PR, точные PR HEAD/merge SHA и текущий
+   remote `main`; обновить чистый Docker `main` через Gateway
+   **`workspace.update_main_from_pr`**. Старый `workspace.update_main` требует
+   Gateway `mergeRequestId` и не подходит для подтверждения ручного UI merge.
+   Затем выполнить guarded Windows `main` Pull по принятому backend: origin,
+   HEAD/branch/clean, fast-forward ancestry, pin SHA и readback; без reset/stash/force.
+   Source update не означает image build, deploy или restart: это отдельный
+   owner-controlled процесс.
+
+**Чистый primary обязателен:** не редактировать и не копить staged/unstaged/
+untracked изменения в `Repos/<repo>`. Edit/test/stage/commit — только в
+зарегистрированном task worktree. Исторические изменения сначала сохранить
+в проверенную recovery-копию и перенести в отдельную задачу по
+[UC-CONT-019](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/worktrees.md#uc-cont-019),
+не прятать их через ignore/stash/reset/clean.
 
 **Нормативные владельцы правил:** актуальный реестр контейнера из
 `/workspace/repo/README.md` (UC-CONT-002/003/005/018) задаёт общий маршрут;
@@ -57,14 +67,13 @@ owner deployment records и условий cleanup.
 их интерфейсного контракта здесь.
 
 **Состояние реализации (2026-11-07):** Browser UI/API объединены в
-`main` после PR #1; новые изменения готовятся в
-`task/mirror-gateway-ci-20261107`. Это всё ещё **source candidate**,
+`main`; CI workflow принят через PR #3. Это всё ещё **source candidate**,
 не установленная Windows-версия. SHA веток и PR/CI теперь читаются через
 Gateway (при отсутствии scope — unknown), а Browser UI не содержит доступных
 Git write routes. Legacy Docker Git helper не выполняет сетевые операции
 к GitHub. Обязательный CI и разрешение merge остаются у Gateway;
 Windows listener/ASK Pull всё ещё MANUAL-PENDING. Следующая проверка —
-GitHub Actions workflow, затем ручной запуск на реальной Windows.
+ручной запуск на реальной Windows по API-FIRST.
 
 ## Предыдущий WinForms Mirror: описание существующего кода, не инструкция для Gateway-only публикации
 

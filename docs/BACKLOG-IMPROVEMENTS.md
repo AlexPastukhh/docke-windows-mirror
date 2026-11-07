@@ -4,7 +4,10 @@
 
 ## Приоритеты
 
-- Убрать legacy прямой Docker-helper GitHub network для AI workflow; использовать **только typed Gateway** с реальной token-scoped authorization. Текущий source после 2026-11-07 содержит API-first candidate и унаследованные helper routes; наличие последних **не** даёт разрешения его запускать. Source кандидат отключения network в другой worktree — не deployed.
+- **Source выполнен:** legacy Docker-helper блокирует прямой GitHub network,
+  API-first source использует typed Gateway. Отдельно остаётся Windows
+  listener/TLS/WebAuthn и browser acceptance по [API-FIRST](API-FIRST.md).
+  Наличие source и зелёного CI не означает установку Windows runtime.
 - Сверить реальную поддержку linked task worktrees в GUI и read-only API. `Repos/<repo>/main`, конкретные `task/<slug>`, Windows clone и выбранная строка UI должны быть однозначно связаны перед Stage/Commit/Push/Pull; при ambiguous status — STOP.
 - Дать owner-run Windows PowerShell 5.1 **read-only Preview → exact-SHA fast-forward Apply** только для заранее принятого GitHub main, без reset/clean, повторной регистрации или прежнего PAT fallback.
 - Добавить проверку свежести результатов и обозначение `UNKNOWN`, `REMOTE_DENIED`, `DIRTY`, `NOT_MAIN`, вместо ложного «актуален» по одному локальному SHA. Учесть GitHub token-scoped repo list: наличие Docker checkout не гарантирует доступ.

@@ -2,6 +2,11 @@
 
 Standalone Docker–Windows Mirror application.
 
+Начать с [локального реестра Mirror](docs/use-cases/README.md) и короткого входа
+[главного реестра Fortis](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/README.md).
+Каждый новый чат читает полностью UC-CONT-002/003; остальные UC — по задаче,
+просматривать весь каталог не требуется.
+
 Canonical source for the independent Windows PowerShell 5.1 / WinForms interface for checking Docker,
 GitHub, and Windows Git mirrors. The primary Git repositories live inside
 Fortis Docker; Windows is a receiver. All actions are owner-triggered.
