@@ -1,14 +1,85 @@
 # Mirror Workflow: поведение и безопасность
 
-## Docker → GitHub → Windows: branch-aware workflow inspector (new default)
+## Актуальная схема: Docker task → Gateway → GitHub → Windows main
 
-The standalone `Fortis-Windows-Mirror-Status.ps1` GUI loads
-`Mirror-Workflow.UI.cs`. The original main-only `Mirror-Status.UI.cs` is retained
-as historical/source reference, and `-Cli` still runs the old text-only
-`Mirror-Status.Report.ps1` (main-only). The new UI is **Windows PowerShell 5.1 / WinForms**,
-not JavaScript. It uses the Docker-first read-only exporter
-`tools/Export-Docker-Branch-Workflow.py` inside `fortis-repo-test`; keep that
-exporter in the Docker Git checkout. **Docker changes reach Windows only after Git push and a Windows pull.**
+Для обычных проектов Docker primary находится в `/workspace/repo/Repos/<repo>`
+и остаётся на `main`. Каждая независимая задача выполняется в **linked Git
+worktree** `/workspace/repo/Worktrees/<repo>/<task>`, где ветка относится к задаче.
+Windows содержит отдельный **primary clone** `%USERPROFILE%\Repos\<repo>` на
+`main`: не переключать его на task-ветку и не создавать там рабочие task worktrees.
+`/workspace/repo/Workfiles` предназначен для рабочих/передаточных материалов,
+но не заменяет Git-источники.
+
+Git worktree — зарегистрированная Git рабочая директория, а не просто папка.
+Для инвентаризации использовать `git worktree list --porcelain -z` от Docker
+primary, проверять ветку, HEAD, общий Git directory и реальный путь. Неизвестные
+или неканонические записи показывать как требующие проверки; не направлять в них
+запись без подтверждения. У каждой задачи свой worktree/branch: не делать второй
+checkout той же ветки, не переключать primary ради задачи и не очищать чужие
+worktrees автоматически. Взаимосвязанные worktrees сохраняются до проверки
+owner deployment records и условий cleanup.
+
+**Доставка коммитов:**
+
+1. Установить точные repo, primary `main`, linked task worktree и Git-состояние.
+   Не менять dirty primary чужой задачи с помощью reset/stash. Для native
+   Gateway workflow регистрация/adoption task выполняется через typed
+   `workspace.create_task` и требует соответствующих preconditions, в том числе
+   проверенного base SHA и чистого primary; наличие локального worktree не
+   означает, что он уже зарегистрирован в Gateway.
+2. Изменить и проверить файлы в task worktree, сделать stage/commit выбранных
+   файлов; зафиксировать SHA и доказательства проверок. Для принятого native
+   scope использовать typed операции `fortis_approvals.workflow.client.default_client()`;
+   локальные Git read-only команды допустимы, но **сетевые GitHub-эффекты
+   через прямой `git fetch/push`, credential-helper или GitHub connector запрещены**.
+3. Опубликовать именно существующие Git-коммиты через Gateway `publish`
+   (`github.push_commits`), с сохранённым requestId и проверенным remote SHA.
+   Не считать успешный GitHub read достаточным разрешением на запись. Live
+   capabilities и реальный token scope проверяются отдельно для каждого repo;
+   при DENY/403/unknown остановиться, а не переходить на альтернативный клиент.
+4. Создать PR через typed Gateway, проверить обязательные GitHub Actions/statuses
+   **для точного PR HEAD**. `ASK` можно отправлять без отдельного вопроса в
+   чате, но исполнение требует подтверждения владельца через Owner Portal
+   (WebAuthn). Не выполнять merge по просто последнему зелёному запуску.
+   В случае `UNCERTAIN` сначала status/reconcile по прежнему requestId.
+5. После подтверждённого merge обновить чистый Docker `main` до одобренного
+   SHA через Gateway `workspace.update_main`. Затем выполнить охраняемый
+   Windows `main` pull: проверить точный origin, HEAD, ветку, чистоту,
+   fast-forward ancestry, pin SHA и readback; никаких reset/stash/force.
+   Изменение исходников **не** означает сборку image, deploy или перезапуск
+   работающих сервисов: это отдельный owner-controlled процесс.
+
+**Нормативные владельцы правил:** актуальный реестр контейнера из
+`/workspace/repo/README.md` (UC-CONT-002/003/005/018) задаёт общий маршрут;
+[native Gateway contract][gateway-native] — операции,
+политики и границы доступа. Текущее API-first и Browser UI, его запуск,
+ограничения и тесты описаны в [API-FIRST](API-FIRST.md), без дублирования
+их интерфейсного контракта здесь.
+
+**Состояние реализации (2026-11-07):** Browser UI + API разработаны в
+`task/mirror-api-workflow-20261107` как **source candidate**, не установленная
+Windows-версия. Чтение PR/CI использует существующий typed Gateway клиент;
+подтверждение обязательного CI и разрешение на merge остаются у Gateway.
+Часть исходного browser-кода всё ещё читает GitHub SHA через `git ls-remote`,
+а legacy Docker Push работает вне Gateway. **Эти пути не соответствуют текущему
+Gateway-only контракту и не должны использоваться как разрешённая доставка.**
+До исправления и Windows-acceptance не считать candidate полностью готовым к
+production. Windows Gateway listener и ASK Pull остаются MANUAL-PENDING.
+
+## Предыдущий WinForms Mirror: описание существующего кода, не инструкция для Gateway-only публикации
+
+Ниже сохранено описание WinForms-реализации и её проверок, чтобы можно было
+сопоставлять поведение при миграции. Оно не переопределяет актуальный маршрут
+выше. В частности, прежние `Push Docker`, прямые GitHub-запросы и переключение
+активной ветки — **исторические механизмы**, а не разрешённые способы
+опубликовать новую task-ветку при действующем Gateway-only режиме.
+
+Standalone `Fortis-Windows-Mirror-Status.ps1` GUI loads
+`Mirror-Workflow.UI.cs`. Original main-only `Mirror-Status.UI.cs` retained as
+historical reference; `-Cli` still runs `Mirror-Status.Report.ps1`. This GUI is
+PowerShell 5.1 / WinForms, not the new Browser UI. It reads the Docker-primary
+`tools/Export-Docker-Branch-Workflow.py` snapshot; its source behavior is
+not evidence of live Windows deployment or Gateway authorization.
 
 **Source of truth and screen:** the table enumerates Git repositories under
 Docker `/workspace/repo/Repos/` (not Windows folders), one row per repository.
@@ -153,3 +224,5 @@ The compiler test does not open the UI, check GitHub, run Docker, switch
 branches or pull. Windows UI compilation and end-to-end owner acceptance
 remain **not verified from the Docker environment**. Treat the newly
 implemented UI as a source candidate until those tests pass.
+
+[gateway-native]: https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/NATIVE-WORKTREE-GATEWAY-2026-11-06.md
