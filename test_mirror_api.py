@@ -54,9 +54,14 @@ class APIClientTests(unittest.TestCase):
         status, body, *_ = self.request("GET", "/api/v1/repositories?remote=true", cookie)
         self.assertEqual(200, status)
         self.assertEqual(["REMOTE_TEST"], json.loads(body)["errors"])
-        self.assertEqual(403, self.request("POST", "/api/v1/repositories", cookie)[0])
+        self.assertEqual(405, self.request("POST", "/api/v1/repositories", cookie)[0])
         self.assertEqual(400, self.request("GET", "/api/v1/repositories?unknown=x", cookie)[0])
         self.assertEqual(403, self.request("GET", "/", cookie, host="attacker.invalid")[0])
+        self.assertEqual(404,self.request("GET", "/api/v1/docker-actions/preview/push/sample/task",cookie)[0])
+        self.assertEqual(405,self.request("POST", "/api/v1/docker-actions/execute",cookie)[0])
+        capabilities=json.loads(self.request("GET", "/api/v1/capabilities",cookie)[1])
+        self.assertTrue(capabilities['readOnly'])
+        self.assertEqual([],capabilities['ownerGitRepos'])
         self.assertEqual(403, self.request("GET", "/session?boot=" + self.server.bootstrap_token + "x")[0])
 
     def test_bootstrap_one_time(self):

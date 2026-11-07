@@ -158,31 +158,16 @@ class DockerGitActionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.actions.exact_repo(self.root, "fixture")
 
-    def test_github_https_git_operations_use_persistent_fortis_helper(self):
-        # No real GitHub access: inspect the exact Git argv only.
-        helper = Path(self.tmp.name) / "fortis-helper"
-        helper.write_text("#!/bin/sh\nexit 1\n")
-        helper.chmod(0o700)
+    def test_github_https_git_operations_are_denied_without_network(self):
+        # The old helper is no longer a permitted GitHub channel.
         remote = "https://github.com/AlexPastukhh/fixture.git"
-        completed = subprocess.CompletedProcess(["git"], 0, stdout=b"", stderr=b"")
-        # The test tempfile lives on Docker /tmp (noexec), so mock only the
-        # executable-bit probe while still validating the complete command.
-        with mock.patch.object(self.actions, "GITHUB_HELPER", helper), \
-             mock.patch.object(self.actions.os, "access", return_value=True), \
-             mock.patch.object(self.actions.mirror, "git", return_value=remote), \
-             mock.patch.object(self.actions.subprocess, "run", return_value=completed) as invoked:
-            self.assertEqual(b"", self.actions.git_result(
-                self.repo, ["ls-remote", "origin", "refs/heads/main"]))
-        argv = invoked.call_args.args[0]
-        self.assertIn("credential.helper=", argv)
-        self.assertIn("credential.helper=" + str(helper), argv)
-        self.assertIn("credential.useHttpPath=true", argv)
-        self.assertIn("http.sslVerify=true", argv)
-        self.assertNotIn("force", argv)
-        with mock.patch.object(self.actions, "GITHUB_HELPER", Path(self.tmp.name) / "missing"), \
-             mock.patch.object(self.actions.mirror, "git", return_value=remote):
-            with self.assertRaisesRegex(ValueError, "helper is unavailable"):
-                self.actions.git_result(self.repo, ["push", "origin", "main"], write=True)
+        with mock.patch.object(self.actions.mirror, "git", return_value=remote), \
+             mock.patch.object(self.actions.subprocess, "run") as invoked:
+            for command in (["ls-remote", "origin", "refs/heads/main"],
+                            ["push", "origin", "main"], ["fetch", "origin", "main"]):
+                with self.assertRaisesRegex(ValueError, "GATEWAY_ONLY_GITHUB_OPERATION"):
+                    self.actions.git_result(self.repo, command, write=True)
+            invoked.assert_not_called()
 
     def test_named_repositories_use_same_git_actions(self):
         # No remote network or live repository: all fixtures are temporary.

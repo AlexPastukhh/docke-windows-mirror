@@ -1,5 +1,5 @@
 'use strict';
-let rows=[], active=null, remoteChecked=false, ownerGitRepos=new Set(), csrf=null, checkController=null;
+let rows=[], active=null, remoteChecked=false, checkController=null;
 const $=id=>document.getElementById(id);
 const node=(tag,text,cls)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=String(text);return e};
 const add=(parent,tag,text,cls)=>{const e=node(tag,text,cls);parent.append(e);return e};
@@ -50,19 +50,7 @@ if(Array.isArray(gh.pullRequests)&&gh.pullRequests.length){
 }
 
 add(d,'h3','Windows primary');const w=target.windows;for(const [k,v] of [['Ветка',w.branch],['HEAD',w.head],['Origin',w.origin],['Origin соответствует',w.originValid],['Чистый',w.clean],['Изменено файлов',w.changedCount],['Отношение к GitHub',w.relation],['Ошибка',w.error||'Нет'],['Время проверки',w.checkedAt]])info(d,k,v);if(w.changedFiles?.length)add(d,'pre',w.changedFiles.join('\n'),'list');add(d,'h3','Docker worktrees');for(const t of target.docker.worktrees){const panel=add(d,'section',undefined,'list');add(panel,'strong',(t.kind==='primary'?'PRIMARY':'WORKTREE')+' · '+(t.branch||'нет ветки'));for(const [k,v]of [['Путь',t.path],['HEAD',t.head],['Origin',t.origin],['Чистый',t.clean],['Изменено файлов',t.changed],['Target доступен',t.targetEligible],['Состояние',t.status],['GitHub SHA ветки',t.remoteSha],['GitHub relation',t.remoteRelation]])info(panel,k,v);if(t.changedFiles?.length)add(panel,'pre',t.changedFiles.join('\n'),'list');
-prCiDetails(panel,t)}add(d,'h3','Действия');const actions=add(d,'div',undefined,'actions');for(const [name,action]of Object.entries(target.actions)){const a=add(actions,'div');add(a,'strong',name);const b=add(a,'button',action.available?'Выполнить':'Недоступно');b.disabled=true;add(a,'p',(action.reasons||[]).join(' · ')||'Нет доступного маршрута','muted')}if(ownerGitRepos.has(target.repoId)){
-  add(d,'h3','Локальные Docker Git-действия (owner route)');
-  add(d,'p','Только для явно разрешённых legacy репозиториев; действия над Docker primary недоступны.','muted');
-  for(const t of target.docker.worktrees){
-    if(t.kind!=='worktree'||!t.targetEligible||!t.task)continue;
-    const box=add(d,'div',undefined,'actions');add(box,'strong',(t.branch||t.task)+' · '+t.task);
-    for(const operation of ['stage','commit','push']){
-      const b=add(box,'button',operation.toUpperCase());
-      b.onclick=()=>startDockerAction(target.repoId,t.task,operation);
-    }
-  }
-}
-info(d,'Политика доступа','Windows Pull — только через Gateway ASK; Docker writes — ограниченный owner route.');}
+prCiDetails(panel,t)}add(d,'h3','Действия');const actions=add(d,'div',undefined,'actions');for(const [name,action]of Object.entries(target.actions)){const a=add(actions,'div');add(a,'strong',name);const b=add(a,'button',action.available?'Выполнить':'Недоступно');b.disabled=true;add(a,'p',(action.reasons||[]).join(' · ')||'Нет доступного маршрута','muted')}info(d,'Политика доступа','Все изменения GitHub выполняются только через Gateway; Browser UI — read-only.');}
 async function load(remote){$('banner').textContent=remote?'Проверка GitHub (без fetch)…':'Чтение Docker и Windows…';$('local').disabled=$('remote').disabled=$('selected-remote').disabled=true;try{const response=await fetch('/api/v1/repositories'+(remote?'?remote=true':''),{cache:'no-store'});if(!response.ok)throw new Error((await response.json()).error||'HTTP '+response.status);const data=await response.json();rows=data.repositories;remoteChecked=remote;active=rows.some(x=>x.repoId===active)?active:rows[0]?.repoId||null;render();$('banner').textContent='Получено '+rows.length+' репозиториев · '+data.checkedAt+(remote?' · GitHub проверен':' · GitHub не проверен')+(data.errors.length?' · Ошибки: '+data.errors.join(', '):'')}catch(e){$('banner').textContent='Проверка не завершена: '+e.message+' · Последний снимок сохранён и может устареть';}finally{$('local').disabled=$('remote').disabled=$('selected-remote').disabled=false}}
 async function checkAll(){
  if(checkController||!rows.length)return;
@@ -101,49 +89,10 @@ async function checkSelected(){
 $('cancel').onclick=()=>{if(checkController)checkController.abort()};
 $('local').onclick=()=>load(false);$('remote').onclick=checkAll;$('selected-remote').onclick=checkSelected;initialize();
 
-function dialogBox(title){const dlg=node('dialog');dlg.className='action-dialog';add(dlg,'h2',title);document.body.append(dlg);dlg.addEventListener('close',()=>dlg.remove());return dlg}
-async function startDockerAction(repo,task,operation){
-  try{
-    $('banner').textContent='Получаю preview '+operation+' для '+repo+'/'+task+'…';
-    const response=await fetch('/api/v1/docker-actions/preview/'+encodeURIComponent(operation)+'/'+encodeURIComponent(repo)+'/'+encodeURIComponent(task),{cache:'no-store'});
-    const preview=await response.json();if(!response.ok)throw new Error(preview.error||'Preview failed');
-    const dlg=dialogBox('Docker '+operation+' · '+repo+' / '+task);
-    info(dlg,'Ветка',preview.branch);info(dlg,'HEAD',preview.head);
-    info(dlg,operation==='push'?'Remote SHA':'Digest',preview.digest);
-    const options={};
-    if(operation==='stage'){
-      const chosen=[];for(let i=0;i<preview.files.length;i++){
-        const label=add(dlg,'label',undefined,'selectfile');const box=node('input');box.type='checkbox';box.value=i;
-        label.append(box,document.createTextNode(' '+preview.files[i]));chosen.push(box);
-      }
-      options.indices=chosen;
-    }else if(operation==='commit'){
-      add(dlg,'p','Коммитит только уже staged файлы.','muted');
-      for(const file of preview.files)add(dlg,'div',file,'muted');
-      const input=node('textarea');input.placeholder='Сообщение коммита';input.maxLength=4000;dlg.append(input);options.message=input;
-    }else add(dlg,'p','Обычный push без force. Только HEAD выбранной task-ветки.','warn');
-    const controls=add(dlg,'div',undefined,'tools');
-    const cancel=add(controls,'button','Отмена');cancel.onclick=()=>dlg.close();
-    const confirm=add(controls,'button','Подтвердить '+operation);
-    confirm.onclick=async()=>{
-      const values=operation==='stage'?{indices:options.indices.filter(b=>b.checked).map(b=>Number(b.value))}:
-        operation==='commit'?{message:options.message.value}:{};
-      if(operation==='stage'&&!values.indices.length){alert('Выберите файлы');return}
-      if(operation==='commit'&&!values.message.trim()){alert('Введите сообщение');return}
-      if(!window.confirm('Выполнить '+operation+' для '+repo+'/'+task+' после проверки свежести preview?'))return;
-      confirm.disabled=true;cancel.disabled=true;
-      try{
-        const result=await fetch('/api/v1/docker-actions/execute',{method:'POST',headers:{'Content-Type':'application/json',
-          'X-Mirror-CSRF':csrf},body:JSON.stringify({previewId:preview.previewId,options:values})});
-        const body=await result.json();if(!result.ok)throw new Error(body.error||'Action failed');
-        dlg.close();$('banner').textContent='Выполнено: '+body.result;await load(false);
-      }catch(e){$('banner').textContent='Результат требует проверки: '+e.message;dlg.close()}
-    };
-    dlg.showModal();$('banner').textContent='Preview готов для '+repo+'/'+task;
-  }catch(e){$('banner').textContent='Действие недоступно: '+e.message}
+async function initialize(){
+ try{
+  const cap=await fetch('/api/v1/capabilities');
+  if(!cap.ok || (await cap.json()).readOnly!==true)throw new Error('READONLY_CAPABILITY_NOT_VERIFIED');
+ }catch(e){$('banner').textContent='API capabilities недоступны: '+e.message}
+ await load(false);
 }
-async function initialize(){try{
- const [cap,session]=await Promise.all([fetch('/api/v1/capabilities'),fetch('/api/v1/csrf')]);
- if(cap.ok&&session.ok){const data=await cap.json(),auth=await session.json();
- ownerGitRepos=new Set(data.ownerGitRepos||[]);csrf=auth.csrf}
-}catch(e){$('banner').textContent='API capabilities недоступны: '+e.message}await load(false)}

@@ -10,7 +10,7 @@ Windows PowerShell 5.1, Docker CLI/Desktop, running container `fortis-repo-test`
 
 ```powershell
 $bootstrap = Join-Path $env:TEMP 'Open-MirrorPreview.ps1'
-docker cp 'fortis-repo-test:/workspace/repo/Worktrees/docke-windows-mirror/mirror-api-workflow-20261107/Open-MirrorPreview.ps1' $bootstrap
+docker cp 'fortis-repo-test:/workspace/repo/Worktrees/docke-windows-mirror/mirror-gateway-ci-20261107/Open-MirrorPreview.ps1' $bootstrap
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap
 ```
 
@@ -36,7 +36,7 @@ This script checks tools and Docker container state, then `docker cp`s the *curr
   ```
 
 - [ ] **PR/CI:** select `fortis-approvals` and click **Проверить выбранный**. Confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses show for matching task branch/SHA; links open github.com. `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
-- [ ] **Scope:** select a different repository and click **Проверить выбранный**. When not configured in native Gateway, `GATEWAY_REPOSITORY_NOT_REGISTERED` is expected, **not** an assertion there are no PRs or CI.
+- [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
 - [ ] **Refresh:** **Обновить локально** updates Docker/Windows status (and resets PR/CI to not checked); **Проверить GitHub** runs repo checks with progress and an option to cancel; existing results are retained when individual checks fail.
 - [ ] **Actions:** Pull and Git-changing buttons are disabled in the preview. No new PR/CI writes should exist.
 - [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories` and `/api/v1/repositories/<repo>?remote=true` return JSON. Direct requests without an authenticated browser session receive `401`.
@@ -44,8 +44,8 @@ This script checks tools and Docker container state, then `docker cp`s the *curr
 
 ## Known limits / diagnostics
 
-- Live Windows execution of the candidate is not yet verified; Python/PowerShell startup, Docker Desktop connectivity and private-repo Git credentials can fail. Report the **exact error code or screenshot**, the selected repo/branch and what you expected; **do not share** the one-time URL token, cookies, machine grants or any other credentials.
-- PR/CI reads use the existing native review Gateway for its **registered** repository (currently `fortis-approvals`). The reader is not a GitHub token fallback and does not have broad multi-repo access. A temporary inability to access Gateway is a valid `GATEWAY_READ_UNAVAILABLE` error, not missing PRs.
+- Live Windows execution of the candidate is not yet verified; Python/PowerShell startup, Docker Desktop connectivity and Gateway scope/credentials can fail. Report the **exact error code or screenshot**, the selected repo/branch and what you expected; **do not share** the one-time URL token, cookies, machine grants or any other credentials.
+- PR/CI and branch reads use the existing native Primary Gateway with its **active token-scoped dynamic repository support**. The reader never uses a Repo GitHub token fallback. A successful repo read does not prove write authorization. A temporary inability to access Gateway is a valid `GATEWAY_READ_UNAVAILABLE` error, not missing PRs.
 - The view shows observed CI runs for an exact PR head and latest attempt per workflow. It does not claim all required checks passed or make PR/CI mutations.
 - Pull, Windows API Gateway TLS, full WebAuthn E2E and permanent Windows service installation are separate MANUAL-PENDING tasks. Do not infer they are working from this preview.
 

@@ -33,6 +33,9 @@ def run(sha,number,conclusion,name='Source CI'):
 class ReaderTests(unittest.TestCase):
     def test_gateway_only_typed_reads_and_exact_sha_checks(self):
         class Client:
+            def list_branches(self,repo,*,page,per_page):
+                assert repo==REPO and page==1 and per_page==100
+                return {'items':[{'name':'main','sha':SHA1},{'name':BRANCH,'sha':SHA2}]}
             def list_pull_requests(self,repo,*,state,page,per_page):
                 self_check=(repo==REPO and state=='all' and per_page==30 and page==1)
                 assert self_check
@@ -46,6 +49,8 @@ class ReaderTests(unittest.TestCase):
                 return {'items':[{'name':'Test','headSha':SHA2,'status':'completed','conclusion':'failure'}],
                         'totalCount':1}
         result=reader.collect(Client(),REPO)
+        self.assertEqual(SHA1,result['head'])
+        self.assertEqual(SHA2,result['branches'][BRANCH])
         self.assertEqual(1,len(result['pullRequests']))
         self.assertEqual(3,len(result['workflowRuns']))
         self.assertEqual(1,len(result['checkRuns'][SHA2]['items']))
@@ -63,7 +68,7 @@ class ReaderTests(unittest.TestCase):
             def __init__(self,**kwargs): pass
             def post(self,path,value):
                 assert path=='/v1/workspace/capabilities'
-                return {'repository':'other'}
+                return {'owner':'AlexPastukhh','repository':'other','dynamicRepositories':False}
         with mock.patch.object(reader,'WorkflowTransport',Gateway), \
                 mock.patch.object(reader,'GitHubClient') as github:
             value=reader.inspect(REPO)
@@ -105,11 +110,12 @@ class ReaderTests(unittest.TestCase):
               'checkRuns':{},'errors':{},'truncated':{}}
         win={'exists':False,'error':'WINDOWS_CLONE_NOT_FOUND','relation':'unknown',
              'originValid':False,'branch':None,'clean':None}
-        github={'head':SHA1,'branches':{'main':SHA1,BRANCH:SHA2},'error':None,'checkedAt':'now', 'requiredCI':'NOT_VERIFIED'}
+        github={'head':SHA1,'branches':{'main':SHA1,BRANCH:SHA2},'error':None,'checkedAt':'now',
+                'requiredCI':'NOT_VERIFIED','pullRequests':data['pullRequests'],
+                'workflowRuns':data['workflowRuns'],'checkRuns':data['checkRuns'],'truncated':{}}
         with mock.patch('mirror_api.operations.docker_inventory',return_value={REPO:[tree,task]}),\
              mock.patch('mirror_api.operations.windows_status',return_value=win),\
-             mock.patch('mirror_api.operations.github_main',return_value=github),\
-             mock.patch('mirror_api.operations.gateway_pr_ci',return_value={**data,'schema':'fortis.github.mirror.v1'}):
+             mock.patch('mirror_api.operations.github_main',return_value=github):
             result=Mirror('/tmp/none').inventory(remote=True)
         item=result['repositories'][0]
         self.assertEqual('OPEN',item['docker']['worktrees'][1]['pullRequest']['status'])
@@ -123,6 +129,9 @@ class ClosedPRVerificationTests(unittest.TestCase):
     def test_merged_is_from_individual_read_not_closed_list_guess(self):
         row={**pull(), 'state':'closed', 'merged':False}
         class Client:
+            def list_branches(self,repo,*,page,per_page):
+                assert repo==REPO and page==1 and per_page==100
+                return {'items':[{'name':'main','sha':SHA1},{'name':BRANCH,'sha':SHA2}]}
             def list_pull_requests(self,repo,*,state,page,per_page):
                 return {'items':[row] if page==1 else [],'page':page,'perPage':per_page}
             def get_pull_request(self,repo,number):
@@ -141,6 +150,9 @@ class ClosedPRVerificationTests(unittest.TestCase):
         from fortis_approvals.core import Denied
         row={**pull(), 'state':'closed', 'merged':False}
         class Client:
+            def list_branches(self,repo,*,page,per_page):
+                assert repo==REPO and page==1 and per_page==100
+                return {'items':[{'name':'main','sha':SHA1},{'name':BRANCH,'sha':SHA2}]}
             def list_pull_requests(self,repo,*,state,page,per_page):
                 return {'items':[row], 'page':page, 'perPage':per_page}
             def get_pull_request(self,repo,number):
@@ -153,3 +165,54 @@ class ClosedPRVerificationTests(unittest.TestCase):
         self.assertEqual('CLOSED_OR_MERGED_UNVERIFIED',pr['status'])
         self.assertFalse(pr['data']['merged'])
         self.assertFalse(pr['data']['mergeVerified'])
+
+
+class DynamicGatewayTests(unittest.TestCase):
+    def test_dynamic_repo_uses_token_scoped_typed_reads(self):
+        class Gateway:
+            def __init__(self,**kwargs): pass
+            def post(self,path,value):
+                assert path=='/v1/workspace/capabilities'
+                return {'owner':'AlexPastukhh','repository':'fortis-approvals',
+                        'dynamicRepositories':True}
+        class Typed:
+            def __init__(self,*,gateway): pass
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}],'page':page}
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                return {'items':[],'page':page}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                return {'items':[],'page':page}
+        with mock.patch.object(reader,'WorkflowTransport',Gateway), \
+             mock.patch.object(reader,'GitHubClient',Typed):
+            data=reader.inspect('docke-windows-mirror')
+        self.assertEqual(SHA1,data['head'])
+        self.assertEqual({},data['errors'])
+
+    def test_missing_branch_read_is_unknown_not_empty_clean(self):
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                from fortis_approvals.core import Denied
+                raise Denied('SCOPE_DENIED')
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                return {'items':[]}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                return {'items':[]}
+        data=reader.collect(Client(),REPO)
+        self.assertIsNone(data['head'])
+        self.assertEqual('GATEWAY_BRANCH_READ_UNAVAILABLE',data['errors']['branches'])
+
+    def test_github_origin_requires_exact_repository_and_gateway(self):
+        from mirror_api.operations import github_main
+        with mock.patch('mirror_api.operations.gateway_pr_ci') as source:
+            wrong=github_main('docke-windows-mirror',
+                'https://github.com/AlexPastukhh/other-repo.git')
+            self.assertEqual('ORIGIN_NOT_ALLOWED',wrong['error'])
+            source.assert_not_called()
+            source.return_value={'head':SHA1,'branches':{'main':SHA1},
+                'pullRequests':[],'workflowRuns':[],'checkRuns':{},'errors':{},'truncated':{}}
+            result=github_main('docke-windows-mirror',
+                'https://github.com/AlexPastukhh/docke-windows-mirror.git')
+            self.assertEqual(SHA1,result['head'])
+            self.assertEqual('fortis-gateway', result['source'])
+            source.assert_called_once_with('docke-windows-mirror')

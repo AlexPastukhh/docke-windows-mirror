@@ -13,7 +13,6 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 from .operations import Mirror, ObservationError, REPO, set_preview_source
 from .pull import PullWorker, PullDenied
-from .docker_actions import DockerActions, ActionDenied
 
 STATIC = Path(__file__).parent / "static"
 
@@ -29,7 +28,6 @@ class MirrorServer(ThreadingHTTPServer):
         self.bootstrap_token = secrets.token_urlsafe(32)
         self.sessions = set()
         self.csrf_key = secrets.token_bytes(32)
-        self.docker_actions = DockerActions(())
         self.lock = threading.Lock()
         super().__init__(address, Handler)
 
@@ -108,18 +106,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/v1/csrf" and not url.query:
             self.send(HTTPStatus.OK, {"csrf": self.csrf(self.session_id())})
             return
-        if url.path.startswith("/api/v1/docker-actions/") and not url.query:
-            parts = url.path.removeprefix("/api/v1/docker-actions/").split("/")
-            if len(parts)!=4 or parts[0]!="preview":
-                self.send(HTTPStatus.NOT_FOUND, {"error": "ACTION_ROUTE_DENIED"})
-                return
-            _, operation, repo, task = parts
-            try:
-                data = self.server.docker_actions.preview_checked(self.session_id(),repo,task,operation)
-            except (ActionDenied, ObservationError) as exc:
-                self.send(HTTPStatus.CONFLICT, {"error": str(exc)})
-                return
-            self.send(HTTPStatus.OK, data)
+        if url.path.startswith("/api/v1/docker-actions/"):
+            self.send(HTTPStatus.NOT_FOUND, {"error": "GATEWAY_ONLY_GIT_WRITES"})
             return
         if url.path.startswith("/api/v1/repositories/"):
             name = url.path.removeprefix("/api/v1/repositories/")
@@ -151,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/v1/capabilities":
             self.send(HTTPStatus.OK, {"schemaVersion": 1, "readOnly": True,
                 "operations": ["list_repositories", "get_repository_status", "list_worktrees", "get_available_actions"],
-                "pullMain": "GATEWAY_ASK_SOURCE_ONLY_NOT_ACTIVATED", "ownerGitRepos": sorted(self.server.docker_actions.allowed)})
+                "pullMain": "GATEWAY_ASK_SOURCE_ONLY_NOT_ACTIVATED", "ownerGitRepos": []})
             return
         if url.query:
             self.send(HTTPStatus.BAD_REQUEST, {"error": "QUERY_DENIED"})
@@ -166,42 +154,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send(HTTPStatus.OK, (STATIC / name).read_bytes(), content_type)
 
     def do_POST(self):
-        if not self.authenticated() or self.session_id() is None:
+        if not self.authenticated():
             self.send(HTTPStatus.UNAUTHORIZED, {"error": "SESSION_REQUIRED"})
             return
-        correct_origin = f"http://127.0.0.1:{self.server.server_port}"
-        if (self.headers.get("Host") != f"127.0.0.1:{self.server.server_port}" or
-                self.headers.get("Origin") != correct_origin or
-                not hmac.compare_digest(self.headers.get("X-Mirror-CSRF", ""),self.csrf(self.session_id()))):
-            self.send(HTTPStatus.FORBIDDEN, {"error": "ACTION_AUTH_DENIED"})
-            return
-        if self.path != "/api/v1/docker-actions/execute" or self.headers.get("Content-Type") != "application/json":
-            self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "ACTION_ROUTE_DENIED"})
-            return
-        try:
-            size=int(self.headers.get("Content-Length","0"))
-            if not 0<size<=10000:
-                raise ValueError()
-            def strict_pairs(items):
-                result = {}
-                for key, item in items:
-                    if key in result:
-                        raise ValueError()
-                    result[key] = item
-                return result
-            value=json.loads(self.rfile.read(size), object_pairs_hook=strict_pairs)
-            if type(value) is not dict or set(value)!={'previewId','options'}:
-                raise ValueError()
-            result=self.server.docker_actions.execute(self.session_id(),value['previewId'],value['options'])
-        except (ValueError, TypeError, UnicodeError, ActionDenied, ObservationError) as exc:
-            # Never expose subprocess stderr or credentials.
-            code=str(exc) if str(exc).isupper() and len(str(exc))<=80 else 'ACTION_INVALID'
-            self.send(HTTPStatus.CONFLICT, {"error": code})
-            return
-        self.send(HTTPStatus.OK, result)
+        self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "GATEWAY_ONLY_GIT_WRITES"})
 
     do_PUT = do_PATCH = do_DELETE = do_POST
-
 
 
 class GatewayHandler(Handler):
@@ -320,10 +278,6 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--preview-source-task", default=None,
                         help="Read-only developer preview: use exporter sources in this Docker task worktree")
-    parser.add_argument("--owner-git-repo", action="append", default=[],
-                        help="Enable local browser Stage/Commit/Push for this legacy-scope repository")
-    parser.add_argument("--native-gateway-repo", action="append", default=['fortis-approvals'],
-                        help="Repository whose Git writes MUST use native Gateway, never browser")
     parser.add_argument("--gateway-listen", action="store_true")
     parser.add_argument("--gateway-bind", default="127.0.0.1")
     parser.add_argument("--gateway-port", type=int, default=443)
@@ -336,17 +290,13 @@ def main(argv=None):
     if not 1024 <= args.port < 65536:
         parser.error("port must be 1024..65535")
     if args.preview_source_task is not None:
-        if args.owner_git_repo or args.gateway_listen:
+        if args.gateway_listen:
             parser.error("preview is read-only: owner Git writes and Gateway listener are disabled")
         try:
             set_preview_source(args.preview_source_task)
         except ObservationError:
             parser.error("invalid preview source task")
-    if (not all(REPO.fullmatch(name) for name in args.owner_git_repo+args.native_gateway_repo) or
-            set(args.owner_git_repo)&set(args.native_gateway_repo)):
-        parser.error("invalid/overlapping local owner Git allowlist")
     server = MirrorServer(("127.0.0.1", args.port), Mirror(args.windows_root))
-    server.docker_actions = DockerActions(args.owner_git_repo)
     external = None
     if args.gateway_listen:
         if not all(REPO.fullmatch(x) for x in args.gateway_repo):

@@ -16,7 +16,7 @@ $docker = (Get-Command docker.exe -CommandType Application -ErrorAction Stop).So
 $null = (Get-Command git.exe -CommandType Application -ErrorAction Stop)
 $null = (Get-Command py.exe -CommandType Application -ErrorAction Stop)
 $container = 'fortis-repo-test'
-$source = '/workspace/repo/Worktrees/docke-windows-mirror/mirror-api-workflow-20261107'
+$source = '/workspace/repo/Worktrees/docke-windows-mirror/mirror-gateway-ci-20261107'
 $names = @(& $docker ps --filter 'name=^/fortis-repo-test$' --format '{{.Names}}')
 if ($LASTEXITCODE -ne 0 -or $names -notcontains $container) {
     throw 'MIRROR_PREVIEW_DOCKER_CONTAINER_NOT_RUNNING'
@@ -36,4 +36,4 @@ if (-not (Test-Path -LiteralPath (Join-Path $previewRoot 'mirror_api\server.py')
 Write-Host ('Temporary preview directory: ' + $previewRoot)
 Write-Host 'This preview is read-only. It does not merge/pull/commit or change the Windows repositories.'
 Write-Host 'Check the one-time browser URL printed next; keep this terminal running while using the UI.'
-& (Join-Path $previewRoot 'Start-MirrorAPI.ps1') -MirrorRoot (Join-Path $env:USERPROFILE 'Repos') -Port $Port -PreviewTask 'mirror-api-workflow-20261107'
+& (Join-Path $previewRoot 'Start-MirrorAPI.ps1') -MirrorRoot (Join-Path $env:USERPROFILE 'Repos') -Port $Port -PreviewTask 'mirror-gateway-ci-20261107'

@@ -56,15 +56,15 @@ owner deployment records и условий cleanup.
 ограничения и тесты описаны в [API-FIRST](API-FIRST.md), без дублирования
 их интерфейсного контракта здесь.
 
-**Состояние реализации (2026-11-07):** Browser UI + API разработаны в
-`task/mirror-api-workflow-20261107` как **source candidate**, не установленная
-Windows-версия. Чтение PR/CI использует существующий typed Gateway клиент;
-подтверждение обязательного CI и разрешение на merge остаются у Gateway.
-Часть исходного browser-кода всё ещё читает GitHub SHA через `git ls-remote`,
-а legacy Docker Push работает вне Gateway. **Эти пути не соответствуют текущему
-Gateway-only контракту и не должны использоваться как разрешённая доставка.**
-До исправления и Windows-acceptance не считать candidate полностью готовым к
-production. Windows Gateway listener и ASK Pull остаются MANUAL-PENDING.
+**Состояние реализации (2026-11-07):** Browser UI/API объединены в
+`main` после PR #1; новые изменения готовятся в
+`task/mirror-gateway-ci-20261107`. Это всё ещё **source candidate**,
+не установленная Windows-версия. SHA веток и PR/CI теперь читаются через
+Gateway (при отсутствии scope — unknown), а Browser UI не содержит доступных
+Git write routes. Legacy Docker Git helper не выполняет сетевые операции
+к GitHub. Обязательный CI и разрешение merge остаются у Gateway;
+Windows listener/ASK Pull всё ещё MANUAL-PENDING. Следующая проверка —
+GitHub Actions workflow, затем ручной запуск на реальной Windows.
 
 ## Предыдущий WinForms Mirror: описание существующего кода, не инструкция для Gateway-only публикации
 

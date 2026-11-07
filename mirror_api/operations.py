@@ -109,33 +109,24 @@ def windows_status(base, repo_id, expected_origin):
 
 
 def github_main(repo_id, origin):
-    result = dict(source="github", checkedAt=checked_at(), repoId=repo_id,
+    """Typed Gateway-only metadata. Invalid/mismatched origin fails closed."""
+    result = dict(source="fortis-gateway", checkedAt=checked_at(), repoId=repo_id,
                   head=None, branches={}, pullRequests=None, workflowRuns=None,
                   checkRuns={}, readErrors={}, truncated={},
                   requiredCI="NOT_VERIFIED", error=None)
-    if not origin or not re.fullmatch(r"(?:https://github\.com/|git@github\.com:)AlexPastukhh/[A-Za-z0-9_.-]+(?:\.git)?", origin, re.I):
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:)AlexPastukhh/([A-Za-z0-9_.-]+?)(?:\.git)?",
+        origin or "", re.I)
+    if not match or match.group(1).casefold() != repo_id.casefold():
         result["error"] = "ORIGIN_NOT_ALLOWED"
         return result
-    try:
-        listing = run(["git", "-c", "credential.interactive=never", "ls-remote", "--heads", origin], timeout=30)
-        branches = {}
-        for row in listing.splitlines():
-            head, ref = row.split("\t", 1)
-            if not SHA.fullmatch(head) or not ref.startswith("refs/heads/"):
-                raise ObservationError("INVALID_REMOTE_SHA")
-            name = ref.removeprefix("refs/heads/")
-            if not name or len(name)>200 or name in branches:
-                raise ObservationError("INVALID_REMOTE_REF")
-            branches[name] = head
-        if len(branches) > 500:
-            raise ObservationError("REMOTE_BRANCH_LIMIT")
-        result["branches"] = branches
-        result["head"] = branches.get("main")
-        if result["head"] is None:
-            raise ObservationError("REMOTE_MAIN_NOT_FOUND")
-    except (ObservationError, ValueError) as exc:
-        result["branches"] = {}
-        result["error"] = str(exc) if isinstance(exc, ObservationError) else "INVALID_REMOTE_SHA"
+    data = gateway_pr_ci(repo_id)
+    result.update(head=data["head"], branches=data["branches"],
+                  pullRequests=data["pullRequests"], workflowRuns=data["workflowRuns"],
+                  checkRuns=data["checkRuns"], readErrors=data["errors"],
+                  truncated=data["truncated"])
+    if result["head"] is None:
+        result["error"] = data["errors"].get("branches", "GATEWAY_MAIN_UNVERIFIED")
     return result
 
 
@@ -161,7 +152,7 @@ def gateway_pr_ci(repo_id):
         return data
     except (ObservationError, ValueError, TypeError, KeyError):
         return {"schema": "fortis.github.mirror.v1", "repoId": repo_id,
-                "pullRequests": None, "workflowRuns": None, "checkRuns": {},
+                "head": None, "branches": {}, "pullRequests": None, "workflowRuns": None, "checkRuns": {},
                 "errors": {"gateway": "GATEWAY_READ_UNAVAILABLE"},
                 "truncated": {}, "source": "fortis-gateway"}
 
@@ -297,11 +288,6 @@ class Mirror:
                 "head": None, "branches": {}, "pullRequests": None,
                 "workflowRuns": None, "checkRuns": {}, "readErrors": {"gateway":"NOT_CHECKED"},
                 "truncated": {}, "requiredCI": "NOT_CHECKED", "error": "NOT_CHECKED"}
-            if remote:
-                prci = gateway_pr_ci(name)
-                github.update(pullRequests=prci["pullRequests"], workflowRuns=prci["workflowRuns"],
-                              checkRuns=prci["checkRuns"], readErrors=prci["errors"],
-                              truncated=prci["truncated"])
             if github.get("head") and windows["exists"] and windows["error"] is None:
                 windows["relation"] = relation_to_sha(self.windows_root / name,
                                                         windows["head"], github["head"])
