@@ -67,3 +67,8 @@ python3 -B -m unittest -q test_mirror_workflow_source test_mirror_docker_actions
 The Windows compilation test must also pass on an actual Windows system.
 Windows PowerShell 5.1 compilation and GUI behavior still require owner
 verification on Windows after the two repository updates.
+
+
+## Будущие улучшения
+
+Единый список задач и технического долга: [BACKLOG-IMPROVEMENTS](docs/BACKLOG-IMPROVEMENTS.md). Он не заменяет действующие source/owner runbooks.
