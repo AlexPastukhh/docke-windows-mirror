@@ -37,7 +37,7 @@ From the reviewed Windows clone:
 The process serves a local browser UI on loopback and prints a one-use URL.
 Keep the terminal open, use the URL in the owner's Windows browser, stop with
 Ctrl+C. Startup and normal inspections never change Git; **only the explicit
-Pull Windows Preview → confirmation** can run guarded Windows fetch/fast-forward. The service is temporary, not an installed
+Pull Windows click → Preview → Execute** can run guarded Windows fetch/fast-forward. The service is temporary, not an installed
 Windows service. Do not share the bootstrap URL or browser cookie.
 
 ## Checklist to record PASS/FAIL + exact mismatch
@@ -63,9 +63,9 @@ Windows service. Do not share the bootstrap URL or browser cookie.
 - [ ] **PR/CI:** select `fortis-approvals` and click **Проверить выбранный**. Confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses show for matching task branch/SHA; links open github.com. `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
 - [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
 - [ ] **Refresh:** **«Обновить список»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use Gateway for remote checks and progressively update the table. **«Отмена проверки»** stops the remaining requests; already checked rows remain available.
-- [ ] **Actions:** **«Pull Windows»** starts a fresh read-only Preview and prompts for owner confirmation. Closing/declining the dialog makes **no Git write**. Browser Stage/Commit/Push routes remain absent; Gateway ASK Pull is **not** activated.
+- [ ] **Actions:** **«Pull Windows»** is a single-click owner action that triggers fresh server Preview and Execute with no second browser confirmation. Reject/dirty/unknown preflight must make **no Git write**. Browser Stage/Commit/Push routes remain absent; Gateway ASK Pull is **not** activated.
 - [ ] **Pull reject cases (before any real apply):** on a selected repo with dirty/not-main Windows or mismatching origin/dirty Docker, the preview must report blockers. GitHub read failure must deny; if Windows already equals GitHub main, preview must deny as no-op. Do not deliberately dirty a valuable clone merely to test this.
-- [ ] **Controlled Pull (owner-run, safe repo only):** after confirming Docker clean primary `main` and GitHub `main` have the same approved SHA, use an intentionally behind **clean** Windows `main`. Click Pull; review the **full** Windows SHA, GitHub SHA, origin and the warning that unknown ancestry is verified after fetch. Confirm once. The result must be `EXECUTED` and Windows `main`/origin/clean readback must match; repeat Preview must show `WINDOWS_ALREADY_CURRENT`. A divergent/ahead history must fail without merge. If `UNCERTAIN`, do not retry until the receipt and actual Windows SHA are inspected.
+- [ ] **Controlled Pull (owner-run, safe repo only):** after confirming Docker clean primary `main` and GitHub `main` have the same approved SHA, use an intentionally behind **clean** Windows `main`. Click Pull **once**. Server rechecks the full Windows SHA, GitHub SHA, origin and ancestry (unknown ancestry is verified after fetch). There is no second confirmation dialog. The result must be `EXECUTED` and Windows `main`/origin/clean readback must match; repeat Preview must show `WINDOWS_ALREADY_CURRENT`. A divergent/ahead history must fail without merge. If `UNCERTAIN`, do not retry until the receipt and actual Windows SHA are inspected.
 - [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories` and `/api/v1/repositories/<repo>?remote=true` return JSON. Direct requests without an authenticated browser session receive `401`.
 - [ ] **Shutdown:** Ctrl+C stops the server. If no Pull was explicitly approved, Windows branch/HEAD and clean status must remain unchanged. A successful approved Pull changes only the selected Windows `main` to its exact target SHA.
 
@@ -79,7 +79,7 @@ Gateway read failure means UNKNOWN, not zero PRs or empty CI. Visible workflow
 runs are observations for the selected SHA, not certified required-CI approval.
 The separate developer preview (`--preview-source-task`) must refuse Pull;
 ordinary owner-local Browser Pull is authorized by exact session-bound preview
-and user confirmation, not by Gateway ASK. Browser Pull does not activate the
+and the user's initial click, not by Gateway ASK. Browser Pull does not activate the
 Gateway provider. Actual pending
 acceptance and feature gaps are owned only by the [backlog](BACKLOG-IMPROVEMENTS.md).
 
