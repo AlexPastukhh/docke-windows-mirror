@@ -11,7 +11,9 @@
 [UC-CONT-005](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md#uc-cont-005).
 Windows на `main`, clean и без unexpected ahead; сверить approved merge SHA,
 origin и branch, preflight повторить перед изменением файлов. Не выполнять
-скрытый reset/stash. Gateway-backed Pull candidate и Windows acceptance
+скрытый reset/stash. Owner-local Browser Pull работает через session-bound Preview/confirm и
+имеющийся Windows `PullWorker` без Gateway ASK. Gateway-backed AI Pull остаётся
+отдельным незапущенным маршрутом. Windows acceptance обоих режимов
 описаны в [API-FIRST](../API-FIRST.md). Старый WinForms путь с прямым GitHub
 fetch не использовать как обход. Если требуемый backend недоступен — STOP,
 не PAT fallback. Source update не запускает Windows listener.

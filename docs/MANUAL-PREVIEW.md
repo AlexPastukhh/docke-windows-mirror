@@ -1,7 +1,9 @@
 # Manual Windows browser check — accepted main source
 
-Browser source is accepted in `main`. This page owns the repeatable read-only
-Windows check procedure; execution status and unfinished work are kept in the
+Browser UI source is accepted in `main`; owner-local Pull is a separate source
+change requiring merge and Windows owner acceptance. This page owns the
+repeatable read-only inspection and guarded Pull acceptance procedure; actual
+execution status and unfinished work are kept in the
 [backlog](BACKLOG-IMPROVEMENTS.md), not a second checklist of project tasks here.
 
 ## Preconditions
@@ -10,8 +12,10 @@ Use Windows PowerShell 5.1, Python >=3.9 (`py -3`), Git/Docker CLI and running
 `fortis-repo-test`. First deliver the approved merged source to the clean Windows
 primary clone by UC-CONT-005; Docker main must include the matching inventory
 and Gateway READ exporters. Source delivery is separate from runtime acceptance.
-Do not add credentials, owner-Git grants or a Gateway listener for this read-only
-browser check. The retained `Open-MirrorPreview.ps1` bootstrap uses an old task
+Do not add new credentials, owner-Git grants or a Gateway listener for this
+browser check; manual Windows Pull uses the already configured Windows Git
+credential, if any. Test Pull only with a reviewed safe repo after both Docker
+and Windows accepted source updates. The retained `Open-MirrorPreview.ps1` bootstrap uses an old task
 path; ordinary startup uses accepted main and does not depend on that worktree.
 
 ## Start
@@ -30,10 +34,10 @@ From the reviewed Windows clone:
 }
 ```
 
-The process serves a read-only browser UI on loopback and prints a one-use URL.
+The process serves a local browser UI on loopback and prints a one-use URL.
 Keep the terminal open, use the URL in the owner's Windows browser, stop with
-Ctrl+C. It reads Windows clone state without a Git write; source pull/installation
-is not performed by this command. The service is temporary, not an installed
+Ctrl+C. Startup and normal inspections never change Git; **only the explicit
+Pull Windows Preview → confirmation** can run guarded Windows fetch/fast-forward. The service is temporary, not an installed
 Windows service. Do not share the bootstrap URL or browser cookie.
 
 ## Checklist to record PASS/FAIL + exact mismatch
@@ -59,9 +63,11 @@ Windows service. Do not share the bootstrap URL or browser cookie.
 - [ ] **PR/CI:** select `fortis-approvals` and click **Проверить выбранный**. Confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses show for matching task branch/SHA; links open github.com. `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
 - [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
 - [ ] **Refresh:** **«Обновить список»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use Gateway for remote checks and progressively update the table. **«Отмена проверки»** stops the remaining requests; already checked rows remain available.
-- [ ] **Actions:** **«Pull Windows»** is disabled pending owner-approved Gateway/Windows acceptance; Browser Stage/Commit/Push routes are absent. No GitHub writes occur from the browser.
+- [ ] **Actions:** **«Pull Windows»** starts a fresh read-only Preview and prompts for owner confirmation. Closing/declining the dialog makes **no Git write**. Browser Stage/Commit/Push routes remain absent; Gateway ASK Pull is **not** activated.
+- [ ] **Pull reject cases (before any real apply):** on a selected repo with dirty/not-main Windows or mismatching origin/dirty Docker, the preview must report blockers. GitHub read failure must deny; if Windows already equals GitHub main, preview must deny as no-op. Do not deliberately dirty a valuable clone merely to test this.
+- [ ] **Controlled Pull (owner-run, safe repo only):** after confirming Docker clean primary `main` and GitHub `main` have the same approved SHA, use an intentionally behind **clean** Windows `main`. Click Pull; review the **full** Windows SHA, GitHub SHA, origin and the warning that unknown ancestry is verified after fetch. Confirm once. The result must be `EXECUTED` and Windows `main`/origin/clean readback must match; repeat Preview must show `WINDOWS_ALREADY_CURRENT`. A divergent/ahead history must fail without merge. If `UNCERTAIN`, do not retry until the receipt and actual Windows SHA are inspected.
 - [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories` and `/api/v1/repositories/<repo>?remote=true` return JSON. Direct requests without an authenticated browser session receive `401`.
-- [ ] **Shutdown:** Ctrl+C stops the service. Windows main remains on the same branch/HEAD and unchanged status; no Git write was performed.
+- [ ] **Shutdown:** Ctrl+C stops the server. If no Pull was explicitly approved, Windows branch/HEAD and clean status must remain unchanged. A successful approved Pull changes only the selected Windows `main` to its exact target SHA.
 
 <a id="known-limits--diagnostics"></a>
 
@@ -71,7 +77,10 @@ For an error, record the exact code, selected repo/branch and expected result;
 do not share URL tokens, cookies, machine grants or provider credentials.
 Gateway read failure means UNKNOWN, not zero PRs or empty CI. Visible workflow
 runs are observations for the selected SHA, not certified required-CI approval.
-Read-only preview does not authorize Pull or provider activation. Actual pending
+The separate developer preview (`--preview-source-task`) must refuse Pull;
+ordinary owner-local Browser Pull is authorized by exact session-bound preview
+and user confirmation, not by Gateway ASK. Browser Pull does not activate the
+Gateway provider. Actual pending
 acceptance and feature gaps are owned only by the [backlog](BACKLOG-IMPROVEMENTS.md).
 
 Detailed source architecture: [API-FIRST](API-FIRST.md).

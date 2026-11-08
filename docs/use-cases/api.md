@@ -9,10 +9,10 @@ Windows Pull через API/browser UI.
 
 **Как:** открыть [API-FIRST](../API-FIRST.md) — единственного владельца
 API, source map, команд запуска и acceptance. Source candidate находится
-в `main`; Windows listener/TLS/WebAuthn и настоящий browser UI ещё требуют
-owner acceptance. Сначала установить, какая версия реально запущена, какие
-routes доступны и какие результаты имеют свежий source SHA. Browser read-only
-UI не даёт AI Git write route. GitHub READ/публикация — только typed Gateway
+в `main`; внедрение ручного Browser Pull и отдельного Windows listener/TLS/WebAuthn
+требуют owner acceptance. Сначала установить, какая версия реально запущена, какие
+routes доступны и какие результаты имеют свежий source SHA. Browser UI предоставляет локальное Preview → owner-confirmed Windows Pull, но
+**не даёт ИИ Git write route**. Отдельный удалённый Gateway ASK остаётся выключен. GitHub READ/публикация — только typed Gateway
 по [UC-CONT-003](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md#uc-cont-003).
 При неизвестном backend или scope — UNKNOWN/STOP, не credential fallback.
 

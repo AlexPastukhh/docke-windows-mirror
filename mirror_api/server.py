@@ -7,6 +7,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 from pathlib import Path
 import secrets
 import threading
@@ -14,6 +15,7 @@ import webbrowser
 from urllib.parse import parse_qs, urlsplit
 from .operations import Mirror, ObservationError, REPO, set_preview_source
 from .pull import PullWorker, PullDenied
+from .browser_pull import BrowserPull
 
 STATIC = Path(__file__).parent / "static"
 
@@ -22,7 +24,7 @@ class MirrorServer(ThreadingHTTPServer):
     allow_reuse_address = False
     daemon_threads = True
 
-    def __init__(self, address, mirror):
+    def __init__(self, address, mirror, *, allow_browser_pull=True, receipt_db=None):
         if address[0] != "127.0.0.1":
             raise ValueError("LOOPBACK_ONLY")
         self.mirror = mirror
@@ -30,6 +32,8 @@ class MirrorServer(ThreadingHTTPServer):
         self.sessions = set()
         self.csrf_key = secrets.token_bytes(32)
         self.lock = threading.Lock()
+        self.allow_browser_pull = bool(allow_browser_pull)
+        self.browser_pull = BrowserPull(mirror, receipt_db)
         super().__init__(address, Handler)
 
 
@@ -82,9 +86,12 @@ class Handler(BaseHTTPRequestHandler):
     def csrf(self, session):
         return hmac.new(self.server.csrf_key, session.encode('ascii'), hashlib.sha256).hexdigest()
 
+    def allowed_host(self):
+        # Binding to loopback is not sufficient against DNS rebinding.
+        return self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}"
+
     def do_GET(self):
-        # Bound to loopback, but still validate Host to prevent DNS rebinding.
-        if self.headers.get("Host") not in (f"127.0.0.1:{self.server.server_port}",):
+        if not self.allowed_host():
             self.send(HTTPStatus.FORBIDDEN, {"error": "HOST_DENIED"})
             return
         url = urlsplit(self.path)
@@ -109,6 +116,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path.startswith("/api/v1/docker-actions/"):
             self.send(HTTPStatus.NOT_FOUND, {"error": "GATEWAY_ONLY_GIT_WRITES"})
+            return
+        # A readback requires the same authenticated session that authorized
+        # the preview; receipt IDs are not general capabilities.
+        match = re.fullmatch(r"/api/v1/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})/pull-results/([0-9a-f-]{36})", url.path)
+        if match and not url.query:
+            try:
+                result = self.server.browser_pull.status(match.group(1), self.session_id(), match.group(2))
+            except PullDenied as exc:
+                self.send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                return
+            self.send(HTTPStatus.OK, result)
             return
         if url.path.startswith("/api/v1/repositories/"):
             name = url.path.removeprefix("/api/v1/repositories/")
@@ -138,8 +156,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send(HTTPStatus.OK, data)
             return
         if url.path == "/api/v1/capabilities":
-            self.send(HTTPStatus.OK, {"schemaVersion": 1, "readOnly": True,
-                "operations": ["list_repositories", "get_repository_status", "list_worktrees", "get_available_actions"],
+            local_pull = self.server.allow_browser_pull and self.server.browser_pull.configured
+            operations = ["list_repositories", "get_repository_status", "list_worktrees", "get_available_actions"]
+            if local_pull:
+                operations += ["preview_windows_pull", "execute_windows_pull", "read_windows_pull_receipt"]
+            self.send(HTTPStatus.OK, {"schemaVersion": 1,
+                "readOnly": not local_pull,
+                "operations": operations,
+                "browserPull": {"configured": local_pull,
+                                "mode": "local_owner_confirm", "previewRequired": True},
                 "pullMain": "GATEWAY_ASK_SOURCE_ONLY_NOT_ACTIVATED", "ownerGitRepos": []})
             return
         if url.query:
@@ -155,12 +180,73 @@ class Handler(BaseHTTPRequestHandler):
         self.send(HTTPStatus.OK, (STATIC / name).read_bytes(), content_type)
 
     def do_POST(self):
+        if not self.allowed_host():
+            self.send(HTTPStatus.FORBIDDEN, {"error": "HOST_DENIED"})
+            return
         if not self.authenticated():
             self.send(HTTPStatus.UNAUTHORIZED, {"error": "SESSION_REQUIRED"})
             return
-        self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "GATEWAY_ONLY_GIT_WRITES"})
+        url = urlsplit(self.path)
+        match = re.fullmatch(r"/api/v1/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})/(pull-preview|pull-execute)", url.path)
+        if not match or url.query:
+            self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "GATEWAY_ONLY_GIT_WRITES"})
+            return
+        if not self.server.allow_browser_pull:
+            self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "BROWSER_PULL_PREVIEW_MODE_DISABLED"})
+            return
+        # Origin and session-derived CSRF token both required; neither an
+        # external website nor a stolen previewId is enough to trigger Git.
+        expected_origin = f"http://127.0.0.1:{self.server.server_port}"
+        supplied_csrf = self.headers.get("X-CSRF-Token", "")
+        if (self.headers.get("Origin") != expected_origin or
+                self.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none") or
+                not re.fullmatch(r"[0-9a-f]{64}", supplied_csrf) or
+                not hmac.compare_digest(supplied_csrf, self.csrf(self.session_id()))):
+            self.send(HTTPStatus.FORBIDDEN, {"error": "BROWSER_ORIGIN_OR_CSRF_DENIED"})
+            return
+        if self.headers.get("Content-Type") != "application/json" or self.headers.get("Transfer-Encoding"):
+            self.send(HTTPStatus.BAD_REQUEST, {"error": "PULL_JSON_REQUIRED"})
+            return
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 < size <= 1024:
+                raise ValueError()
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError()
+            def strict(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ValueError()
+                    result[key] = value
+                return result
+            body = json.loads(raw, object_pairs_hook=strict)
+            if type(body) is not dict:
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError):
+            self.send(HTTPStatus.BAD_REQUEST, {"error": "PULL_JSON_INVALID"})
+            return
+        repo_id, action = match.groups()
+        session = self.session_id()
+        try:
+            if action == "pull-preview":
+                if body:
+                    raise PullDenied("PULL_PREVIEW_FIELDS_INVALID")
+                result = self.server.browser_pull.preview(repo_id, session)
+            else:
+                if set(body) != {"previewId", "confirm"}:
+                    raise PullDenied("PULL_EXECUTE_FIELDS_INVALID")
+                result = self.server.browser_pull.execute(repo_id, session, body["previewId"], body["confirm"])
+        except (PullDenied, ObservationError) as exc:
+            self.send(HTTPStatus.CONFLICT, {"error": str(exc)})
+            return
+        self.send(HTTPStatus.OK, result)
 
-    do_PUT = do_PATCH = do_DELETE = do_POST
+    def do_PUT(self):
+        self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "METHOD_DENIED"})
+
+    do_PATCH = do_DELETE = do_PUT
 
 
 class GatewayHandler(Handler):
@@ -252,10 +338,10 @@ class GatewayHandler(Handler):
             return
         self.send(HTTPStatus.OK, result)
 
-    do_PUT = do_PATCH = do_DELETE = Handler.do_POST
+    do_PUT = do_PATCH = do_DELETE = Handler.do_PUT
 
 
-def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, receipt_db):
+def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, receipt_db, *, shared_worker=None):
     if not cert or not key or not secret_file or not allowed_repos:
         raise ValueError("GATEWAY_TLS_AUTH_CONFIG_REQUIRED")
     token = Path(secret_file).read_text(encoding="ascii").strip()
@@ -266,7 +352,7 @@ def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, re
     server.mirror = mirror
     server.gateway_secret = token
     server.allowed_repos = frozenset(allowed_repos)
-    server.worker = PullWorker(mirror, receipt_db)
+    server.worker = shared_worker if shared_worker is not None else PullWorker(mirror, receipt_db)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=cert, keyfile=key)
@@ -320,7 +406,9 @@ def main(argv=None):
             set_preview_source(args.preview_source_task)
         except ObservationError:
             parser.error("invalid preview source task")
-    server = MirrorServer(("127.0.0.1", args.port), Mirror(args.windows_root))
+    server = MirrorServer(("127.0.0.1", args.port), Mirror(args.windows_root),
+                          allow_browser_pull=args.preview_source_task is None,
+                          receipt_db=args.gateway_receipt_db if args.gateway_listen else None)
     external = None
     if args.gateway_listen:
         if not all(REPO.fullmatch(x) for x in args.gateway_repo):
@@ -329,7 +417,8 @@ def main(argv=None):
             parser.error("gateway receipt database path required")
         external = gateway_server(server.mirror, args.gateway_bind, args.gateway_port,
             args.gateway_cert, args.gateway_key, args.gateway_secret_file,
-            args.gateway_repo, args.gateway_receipt_db)
+            args.gateway_repo, args.gateway_receipt_db,
+            shared_worker=server.browser_pull._worker())
         threading.Thread(target=external.serve_forever, daemon=True).start()
     print(f"Open locally: http://127.0.0.1:{args.port}/session?boot={server.bootstrap_token}", flush=True)
     if args.open_browser:

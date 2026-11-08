@@ -240,7 +240,7 @@ def relation_to_sha(path, source, target):
     return "diverged"
 
 
-def evaluate_actions(windows, github, *, approved_sha=None):
+def evaluate_actions(windows, github, *, docker_primary=None, approved_sha=None):
     """Availability, not authorization: gateway policy is a separate gate."""
     reasons = []
     if windows.get("error"):
@@ -257,10 +257,34 @@ def evaluate_actions(windows, github, *, approved_sha=None):
         reasons.append("FAST_FORWARD_NOT_VERIFIED")
     if not approved_sha or approved_sha != github.get("head"):
         reasons.append("MERGE_CI_APPROVAL_EVIDENCE_REQUIRED")
-    # Pull remains denied until the owner-approved Gateway worker is implemented.
+    # Gateway ASK is a different authorization route and remains inactive.
     reasons.append("GATEWAY_WINDOWS_WORKER_NOT_CONNECTED")
+    primary = docker_primary or {}
+    local = []
+    if (primary.get("kind") != "primary" or primary.get("branch") != "main" or
+            primary.get("clean") is not True or primary.get("targetEligible") is not True):
+        local.append("DOCKER_MAIN_NOT_VERIFIED")
+    if not github.get("head") or github.get("error"):
+        local.append("GITHUB_MAIN_UNVERIFIED")
+    if primary.get("head") != github.get("head"):
+        local.append("DOCKER_MAIN_NOT_AT_GITHUB_MAIN")
+    if windows.get("error") or not windows.get("originValid"):
+        local.append("WINDOWS_ORIGIN_NOT_VERIFIED")
+    if windows.get("branch") != "main":
+        local.append("WINDOWS_NOT_ON_MAIN")
+    if windows.get("clean") is not True:
+        local.append("WINDOWS_NOT_CLEAN")
+    if windows.get("head") == github.get("head") and github.get("head"):
+        local.append("WINDOWS_ALREADY_CURRENT")
+    if windows.get("relation") in ("ahead", "diverged"):
+        local.append("WINDOWS_NOT_BEHIND_GITHUB")
     return {"pull_main": {"supported": True, "available": False,
                           "policy": "ASK", "reasons": list(dict.fromkeys(reasons))},
+            "pull_main_browser": {"supported": True, "available": not bool(local),
+                                  "policy": "OWNER_LOCAL_PREVIEW_CONFIRM",
+                                  "requiresFreshPreview": True,
+                                  "fastForwardVerified": windows.get("relation") == "behind",
+                                  "reasons": local},
             "stage": {"supported": False, "available": False, "reasons": ["GATEWAY_SCOPE_NOT_CONFIGURED"]},
             "commit": {"supported": False, "available": False, "reasons": ["GATEWAY_SCOPE_NOT_CONFIGURED"]},
             "push": {"supported": False, "available": False, "reasons": ["GATEWAY_SCOPE_NOT_CONFIGURED"]}}
@@ -298,7 +322,7 @@ class Mirror:
                 worktree["remoteRelation"] = ("equal" if remote_sha == worktree.get("head")
                     and remote_sha is not None else "unknown")
                 worktree["pullRequest"], worktree["ci"] = worktree_pr_ci(worktree, github)
-            actions = evaluate_actions(windows, github)
+            actions = evaluate_actions(windows, github, docker_primary=primary)
             output["repositories"].append({"repoId": name, "docker": {"primary": primary,
                 "worktrees": worktrees}, "windows": windows, "github": github, "actions": actions})
         return output

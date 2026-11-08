@@ -5,11 +5,11 @@ This document owns the new service/frontend source usage and its current limits.
 ## Components and available actions
 
 - `mirror_api.operations` reads Docker's **Git-registered** linked worktrees, Windows primary clones, and optional exact GitHub heads without a hidden Git fetch. Noncanonical worktrees remain visible, but are not eligible for native Gateway worktree mutations. An unknown status is never reported as clean/current.
-- `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. The browser endpoints are read-only; all POST/PUT/PATCH/DELETE requests are denied. No browser permission is inherited by the separate Gateway listener.
+- `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. Normal GETs are observational; the **only** owner-local browser mutation is a POST Preview → one-use Execute Windows `main` Pull, protected by exact Host/Origin, session-derived CSRF and a fresh SHA-bound confirmation. Other browser writes are denied. No browser session grants access to the separate Gateway listener.
 - `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only PR metadata and Actions/Checks observations come from the **existing authenticated GitHub Gateway typed client**, invoked from the Docker Repo worker by `tools/Export-Mirror-GitHub-Read.py`. Per-repo branch SHAs also come from typed Gateway `list_branches`, never local `git ls-remote` or a Windows Git credential. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
   the GitHub UI's required checks/reviews; the owner verifies those before manual Merge. Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
-- Browser Stage/Commit/Push write routes and their owner allowlist are **disabled**. The old WinForms helper remains for local source compatibility, but any network `ls-remote`/fetch/push is blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs must instead use the existing native typed Gateway client; the UI does not yet offer a write workflow.
-- `mirror_api.pull`: Windows main-only fast-forward worker with exact SHA, trusted Docker origin, fresh Windows/GitHub preflight, fixed Git commands, readback and SQLite receipt. It is reachable only over a separately configured authenticated HTTPS Gateway listener. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
+- Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows Pull is separate from GitHub network publication and may perform guarded Git fetch only in the Windows receiver.
+- `mirror_api.pull`: shared Windows `main`-only fast-forward worker with exact SHA, clean Docker `main` == verified GitHub `main`, matching trusted Docker/Windows origin, repeated Windows/GitHub preflight, fixed `git fetch` and pinned `merge --ff-only`, readback and durable SQLite receipt. `mirror_api.browser_pull` authorizes a one-shot owner-local browser invocation; an additional authenticated HTTPS Gateway listener is separately configurable and disabled by default. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
 - **Mirror-provider не является действующим Gateway provider:** его исходники
   (`fortis_approvals/integrations/mirror/`) находятся как **untracked** файлы
   только в `fortis-approvals` task worktree `task/mirror-provider-20261107`;
@@ -49,9 +49,13 @@ The browser now preserves the **old WinForms presentation hierarchy**:
    are exclusively in the opt-in Worktrees tab. Ahead/behind are only shown
    where the backend confirms Git ancestry; mismatching SHAs otherwise remain
    `НАПРАВЛЕНИЕ НЕИЗВЕСТНО`.
-5. **Pull Windows remains disabled** until the owner-approved Gateway/Windows
-   operation is activated and end-to-end verified. Old WinForms Stage/Commit/
-   Push/switch must not be silently re-enabled or called from the browser.
+5. **Pull Windows is now an owner-local action**: the selected Docker primary
+   and Windows `main` must both be clean, Docker `main` must match fresh GitHub
+   `main`, and the Windows origin must match. Preview displays both **full SHA**;
+   the owner must explicitly confirm. If Windows lacks the target Git objects,
+   direction remains unknown until guarded `fetch`, then `merge --ff-only` is
+   verified before any worktree change. **Gateway ASK Pull remains unactivated**;
+   old WinForms Stage/Commit/Push/switch must not be re-enabled in the browser.
 
 The JS behavior is covered by the dependency-free Node fixture in
 `tests/mirror_table_ui_smoke.js`; `test_mirror_table_ui.py` includes that smoke
@@ -78,13 +82,55 @@ wrapper, `Start-MirrorAPI.ps1 -OpenBrowser` asks Python to open the **same
 one-use loopback session URL** in the Windows default browser. Normal direct
 launch continues to print the URL without opening a browser. If browser auto-
 open fails, the process remains running and the printed URL can be used manually.
-No new listener, GitHub write endpoint, Windows Pull, or service is enabled.
+No external listener, GitHub publishing endpoint or service is enabled.
+Owner-local Windows Pull is available only after an explicit Preview and
+confirmation, independent of Gateway ASK. The retained `--preview-source-task`
+developer preview remains **strictly read-only** and denies browser Pull.
 
-The read-only browser process uses reviewed source from the Windows primary
+The browser process uses reviewed source from the Windows primary
 clone and matching accepted exporters in Docker. [MANUAL-PREVIEW](MANUAL-PREVIEW.md)
 owns the command and checklist; no second copy is maintained here. PR/CI/branch
 reads use the existing Repo typed Gateway client and machine grant, never a
 Windows PAT fallback. Observed CI success does not certify the required gate.
+
+## Manual Windows Pull — owner-local Browser UI
+
+On accepted Windows source (`Start-MirrorAPI.ps1`, normally via Script Center)
+select one Docker primary and click **Pull Windows**. The browser first retrieves
+a same-session CSRF token and POSTs `{}` to
+`/api/v1/repositories/<repo>/pull-preview`. The Windows API re-reads Docker,
+Windows and **fresh GitHub `main` via the existing typed Gateway reader**;
+it accepts only matching registered clean Docker primary `main`, clean Windows
+primary `main` with the exact expected origin, and non-equal heads with no
+known ahead/diverged history. It requires Docker `main` == GitHub `main`.
+
+If Windows does not yet have the Git object for the target SHA, **Preview does
+not claim fast-forward is proven**: it shows a conditional warning. The browser
+presents full Windows/Docker/GitHub SHA and origin, explicitly asks the owner to
+confirm, then sends a one-use `previewId` and fixed confirmation phrase to
+`/api/v1/repositories/<repo>/pull-execute`. The server binds the preview to the
+cookie session, target repo, expected Windows SHA, target SHA, origin and 120s
+TTL. Arbitrary Git paths, branch names, commands, URLs, tokens or SHAs cannot
+be supplied through Execute. This does **not** create a Fortis Gateway ASK.
+
+The shared `PullWorker` records a durable receipt before any Git effect under
+`%LOCALAPPDATA%\FortisMirror\pull-receipts.sqlite3`, repeats trust/dirty/HEAD
+checks, uses Windows-owner Git authorization only for `git fetch origin main`,
+compares exact `FETCH_HEAD` with approved target and proves `merge-base` ancestry.
+Only then it attempts `git merge --ff-only <pinned SHA>` and checks Windows
+branch/HEAD/origin/clean readback. No switch/reset/stash/force/auto-deploy.
+Receipt status is bound to the initiating browser session at
+`GET /api/v1/repositories/<repo>/pull-results/<requestId>`. On `UNCERTAIN` or
+connection loss **do not issue a new Pull automatically**: inspect Windows and
+reconcile/read back the stored result. The browser preview is disabled whenever
+`--preview-source-task` is used. When the separate Gateway listener is enabled,
+it uses the **same worker and receipt database** as owner-local Pull.
+
+**Required Windows owner acceptance:** verify read-only access and the blocked
+scenarios first, then run a controlled actual fast-forward on a reviewed safe
+repo. Linux offline tests and green CI do not prove Windows credential behavior,
+NTFS writes, Windows error paths, or Script Center lifecycle. Use
+[MANUAL-PREVIEW](MANUAL-PREVIEW.md) for the owner test procedure.
 
 ## Gateway listener (not deployed)
 
@@ -107,8 +153,9 @@ runtime reader still fails closed if the typed client is unavailable.
 ## Source checks and acceptance boundary
 
 Run `python3 -B -m unittest -q test_mirror_pr_ci test_mirror_api test_mirror_worktrees test_mirror_docker_actions test_mirror_workflow_source test_mirror_git_history test_mirror_status_source`
-from the Mirror task worktree. These offline tests do not prove Windows/TLS or
-live Gateway Pull. The read-only browser action map above is the implemented
-contract; unfinished development and all pending acceptance are maintained only
+from the Mirror task worktree. Include `test_mirror_browser_pull` and `test_mirror_table_ui` in the offline
+suite. Tests cover owner preview/session/CSRF/replay and the Node button flow,
+but cannot prove Windows Git credentials, NTFS or live Gateway ASK. All other
+browser Git writes remain disabled; pending acceptance is maintained only
 in [BACKLOG-IMPROVEMENTS](BACKLOG-IMPROVEMENTS.md). The reusable owner check
 procedure belongs to [MANUAL-PREVIEW](MANUAL-PREVIEW.md).

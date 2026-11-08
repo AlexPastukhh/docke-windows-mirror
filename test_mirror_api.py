@@ -60,7 +60,7 @@ class APIClientTests(unittest.TestCase):
         self.assertEqual(404,self.request("GET", "/api/v1/docker-actions/preview/push/sample/task",cookie)[0])
         self.assertEqual(405,self.request("POST", "/api/v1/docker-actions/execute",cookie)[0])
         capabilities=json.loads(self.request("GET", "/api/v1/capabilities",cookie)[1])
-        self.assertTrue(capabilities['readOnly'])
+        self.assertEqual(capabilities['readOnly'], not capabilities['browserPull']['configured'])
         self.assertEqual([],capabilities['ownerGitRepos'])
         self.assertEqual(403, self.request("GET", "/session?boot=" + self.server.bootstrap_token + "x")[0])
 
@@ -150,6 +150,22 @@ class GitStatusTests(unittest.TestCase):
         self.assertFalse(action["available"])
         self.assertIn("GATEWAY_WINDOWS_WORKER_NOT_CONNECTED", action["reasons"])
 
+    def test_local_pull_availability_is_separate_from_gateway_ask(self):
+        primary = {'kind':'primary','branch':'main','head':'b'*40,
+                   'clean':True,'targetEligible':True}
+        windows = {'error':None,'originValid':True,'branch':'main',
+                   'clean':True,'head':'a'*40,'relation':'unknown'}
+        github = {'error':None,'head':'b'*40}
+        action = evaluate_actions(windows, github, docker_primary=primary)
+        self.assertFalse(action['pull_main']['available'], 'Gateway ASK still inactive')
+        self.assertTrue(action['pull_main_browser']['available'],
+                        'Unknown direction can be confirmed only after verified fetch')
+        self.assertFalse(action['pull_main_browser']['fastForwardVerified'])
+        windows['relation'] = 'ahead'
+        self.assertFalse(evaluate_actions(windows,github,docker_primary=primary)['pull_main_browser']['available'])
+        primary['head'] = 'c'*40
+        self.assertFalse(evaluate_actions(windows,github,docker_primary=primary)['pull_main_browser']['available'])
+
     def test_inventory_failed_not_empty(self):
         mirror = Mirror(self.base)
         with mock.patch("mirror_api.operations.docker_inventory", side_effect=ObservationError("DOCKER_DOWN")):
@@ -191,6 +207,17 @@ class DurablePullTests(unittest.TestCase):
         with self.worker._db() as db:
             count = db.execute('select count(*) from pull_receipts').fetchone()[0]
         self.assertEqual(1, count)
+
+    def test_worker_rejects_docker_main_not_matching_target_before_fetch(self):
+        registered={'fixture':[{'kind':'primary','origin':self.payload['origin'],
+            'branch':'main','head':self.payload['expectedHead'],
+            'clean':True,'targetEligible':True}]}
+        with mock.patch('mirror_api.pull.docker_inventory',return_value=registered), \
+             mock.patch('mirror_api.pull.subprocess.run') as fetch:
+            result=self.worker.run(self.payload,repo_id='fixture',allowed_repos={'fixture'})
+        self.assertEqual('UNCERTAIN',result['state'])
+        self.assertEqual('DOCKER_MAIN_NOT_AT_TARGET',result['error'])
+        fetch.assert_not_called()
 
     def test_preflight_never_fetches_without_docker_registration(self):
         with mock.patch('mirror_api.pull.docker_inventory', return_value={}), mock.patch('mirror_api.pull.subprocess.run') as fetch:
@@ -302,7 +329,8 @@ class RealGitFastForwardFixture(unittest.TestCase):
                     cmd=[x.replace('protocol.file.allow=never','protocol.file.allow=always') for x in cmd]
                     return original_run(cmd,*args,**kwargs)
                 return original_run(argv,*args,**kwargs)
-            registered={'sample':[{'kind':'primary','origin':origin}]}
+            registered={'sample':[{'kind':'primary','origin':origin, 'branch':'main',
+                'head':target, 'clean':True, 'targetEligible':True}]}
             with mock.patch('mirror_api.pull.docker_inventory',return_value=registered), \
                 mock.patch('mirror_api.pull.github_main',return_value={'head':target,'error':None}), \
                 mock.patch('mirror_api.pull.subprocess.run',side_effect=local_fetch):
