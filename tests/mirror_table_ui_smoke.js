@@ -54,15 +54,35 @@ const fixture = (name, head, task, opts = {}) => ({
 const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: false});
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
 let clipboard = null;
-const requests = [];
-const fetch = async url => {
-  requests.push(url);
-  if (url === '/api/v1/capabilities') return {ok: true, json: async () => ({readOnly: true})};
+let confirmed = false, pulled = false;
+const confirmations = [];
+const requests = [], requestOptions = [];
+const fetch = async (url, options = {}) => {
+  requests.push(url); requestOptions.push(options);
+  if (url === '/api/v1/capabilities') return {ok: true, json: async () => ({
+    readOnly: false, browserPull: {configured: true, mode: 'local_owner_confirm'}})};
+  if (url === '/api/v1/csrf') return {ok: true, json: async () => ({csrf: 'fixture-csrf'})};
+  if (url.endsWith('/pull-preview')) return {ok: true, json: async () => ({
+    available: true, repoId: 'fortis-approvals',
+    windowsHead: sha('c'), targetSha: sha('d'), dockerHead: sha('d'),
+    origin: 'https://github.com/AlexPastukhh/fortis-approvals.git',
+    fastForward: 'TO_BE_VERIFIED_AFTER_FETCH', requiredCI: 'NOT_VERIFIED',
+    previewId: '12345678-1234-4234-8234-123456789abc',
+    requestId: '22345678-1234-4234-8234-123456789abc', reasons: []
+  })};
+  if (url.endsWith('/pull-execute')) {
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['X-CSRF-Token'], 'fixture-csrf');
+    assert.equal(JSON.parse(options.body).confirm, 'PULL_WINDOWS_MAIN');
+    pulled = true;
+    return {ok: true, json: async () => ({state: 'EXECUTED', head: sha('d'),
+      requestId: '22345678-1234-4234-8234-123456789abc'})};
+  }
   if (url === '/api/v1/repositories') return {ok: true, json: async () => ({
     checkedAt: '2026-11-08T00:00:00Z', errors: [], repositories: [mirror, approvals]})};
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
-    return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : sha('c'),
+    return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
       'updated-task', {checked: true, relation: 'equal'})})};
   }
   throw Error('unexpected fetch ' + url);
@@ -70,7 +90,8 @@ const fetch = async url => {
 const sandbox = vm.createContext({
   document: {getElementById: key => elements[key], createElement: tag => new Element(tag)},
   navigator: {clipboard: {writeText: async value => { clipboard = value; }}},
-  fetch, console, AbortController, Map, Promise
+  fetch, console, AbortController, Map, Promise,
+  window: {confirm: text => { confirmations.push(text); return confirmed; }}
 });
 vm.runInContext(source, sandbox, {filename: 'app.js'});
 (async () => {
@@ -111,5 +132,25 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   assert.equal(elements['tab-row'].attributes['aria-selected'], 'true');
   assert.match(elements['row-full'].textContent, /РАВЕН GITHUB/);
+  assert.equal(elements['pull-windows'].disabled, false, 'Manual Pull is enabled on selected row');
+  await elements['pull-windows'].onclick();
+  assert.equal(confirmed, false);
+  assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 0,
+    'Owner cancel must never execute Git');
+  assert.match(elements['pull-result'].textContent, /отменён владельцем/);
+  assert.ok(confirmations[0].includes(sha('d')), 'Confirmation shows full pinned target SHA');
+  assert.ok(confirmations[0].includes('после fetch нужен строго fast-forward'),
+    'Unknown ancestry must be disclosed before owner authorization');
+  confirmed = true;
+  await elements['pull-windows'].onclick();
+  assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 1,
+    'Explicit owner approval triggers exactly one Execute');
+  assert.match(elements['pull-result'].textContent, /Windows main обновлён/);
+  assert.match(elements['pull-result'].textContent, new RegExp(sha('d')));
+  assert.equal(elements['primary-rows'].children.length, 2);
+  assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
+  const previewOptions = requestOptions.filter((_, index) => requests[index].endsWith('/pull-preview'));
+  assert.equal(previewOptions.length, 2);
+  assert.ok(previewOptions.every(opt => opt.method === 'POST' && opt.headers['X-CSRF-Token'] === 'fixture-csrf'));
   console.log('MIRROR_PRIMARY_TABLE_SMOKE_PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});

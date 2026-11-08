@@ -11,6 +11,7 @@ const MAIN_COLUMNS = [
   'Workflow · Итог', 'Workflow · Действие'
 ];
 let rows = [], active = null, detailTab = 'row', checkController = null;
+let pullBusy = false, browserPullEnabled = false;
 const selectedWorktrees = new Map();
 const $ = id => document.getElementById(id);
 const el = (tag, value, cls) => {
@@ -113,6 +114,10 @@ function rowDetails(row) {
     'Windows main ↔ GitHub: ' + windowsGithub(row),
     'Docker main ↔ GitHub: ' + dockerGithub(row),
     'Обязательный CI: ' + show(gh.requiredCI),
+    'Ручной Windows Pull (оценка): ' + (row.actions && row.actions.pull_main_browser &&
+      row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
+      'Preview / проверки требуются') +
+      ' · окончательное решение принимает только свежий серверный Preview',
     'Gateway read errors: ' + (gh.readErrors && Object.keys(gh.readErrors).length ?
       Object.entries(gh.readErrors).map(([key, value]) => key + '=' + value).join('; ') : 'Нет / не получены'),
     '', 'ИЗМЕНЁННЫЕ ФАЙЛЫ DOCKER PRIMARY (git status)',
@@ -189,7 +194,8 @@ function render() {
   $('row-full').textContent = chosen ? rowDetails(chosen) : 'Выберите строку основной таблицы.';
   renderWorktrees(chosen);
   $('copy-details').disabled = !chosen;
-  $('selected-remote').disabled = !chosen || !!checkController;
+  $('selected-remote').disabled = !chosen || !!checkController || pullBusy;
+  $('pull-windows').disabled = !chosen || !!checkController || pullBusy || !browserPullEnabled;
 }
 function renderWorktrees(row) {
   const body = $('worktree-rows'); body.replaceChildren();
@@ -242,7 +248,8 @@ function setBusy(busy) {
   $('local').disabled = busy;
   $('remote').disabled = busy;
   $('selected-remote').disabled = busy || !active;
-  $('cancel').disabled = !busy;
+  $('pull-windows').disabled = busy || !active || !browserPullEnabled;
+  $('cancel').disabled = !checkController;
 }
 function replaceRows(items) {
   if (!Array.isArray(items)) throw new Error('INVALID_REPOSITORY_LIST');
@@ -251,7 +258,7 @@ function replaceRows(items) {
   render();
 }
 async function loadLocal() {
-  if (checkController) return;
+  if (checkController || pullBusy) return;
   $('banner').textContent = 'Чтение Docker primary и Windows…';
   $('local').disabled = $('remote').disabled = $('selected-remote').disabled = true;
   try {
@@ -266,7 +273,7 @@ async function loadLocal() {
   } finally { setBusy(false); }
 }
 async function checkRemote(all) {
-  if (checkController || !rows.length || (!all && !active)) return;
+  if (checkController || pullBusy || !rows.length || (!all && !active)) return;
   const names = all ? rows.map(row => row.repoId) : [active];
   checkController = new AbortController();
   const signal = checkController.signal;
@@ -302,6 +309,101 @@ async function checkRemote(all) {
         '. Отдельные ошибки Gateway смотрите в нижнем блоке.';
   } finally { checkController = null; setBusy(false); }
 }
+function showPullResult(message) {
+  $('pull-result').textContent = message;
+  $('pull-result').hidden = !message;
+}
+async function jsonResponse(response) {
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
+  return data;
+}
+async function pullWindows() {
+  if (!browserPullEnabled || !active || checkController || pullBusy) return;
+  const repo = active;
+  pullBusy = true;
+  setBusy(true);
+  showPullResult('Проверка Windows main и GitHub main для ' + repo + '…');
+  let requestId = null, submitted = false;
+  try {
+    const csrf = await jsonResponse(await fetch('/api/v1/csrf', {cache: 'no-store'}));
+    const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': csrf.csrf};
+    const prefix = '/api/v1/repositories/' + encodeURIComponent(repo);
+    const preview = await jsonResponse(await fetch(prefix + '/pull-preview', {
+      method: 'POST', headers, body: '{}', cache: 'no-store'
+    }));
+    if (!preview.available) {
+      showPullResult('Pull Windows main недоступен для ' + repo + ': ' +
+        (preview.reasons || []).join(', ') + '. Git не изменён.');
+      return;
+    }
+    requestId = preview.requestId;
+    const conditional = preview.fastForward === 'TO_BE_VERIFIED_AFTER_FETCH';
+    const summary = [
+      'Репозиторий: ' + repo,
+      'Windows main: ' + preview.windowsHead,
+      'GitHub main:  ' + preview.targetSha,
+      'Docker main:  ' + preview.dockerHead,
+      'Origin: ' + preview.origin,
+      'Проверка истории: ' + (conditional ?
+        'до fetch направление неизвестно; после fetch нужен строго fast-forward' : 'behind, подтверждено'),
+      'Обязательный CI: ' + preview.requiredCI + ' (ручной просмотр/решение владельца)',
+      'Без reset, stash, переключения веток и запуска сервисов.',
+      'Подтвердить один Pull Windows main до указанного SHA?'
+    ].join('\n');
+    showPullResult('Preview готов. Подтвердите точный SHA в диалоге для ' + repo + '.');
+    if (!window.confirm(summary)) {
+      showPullResult('Pull Windows main для ' + repo + ' отменён владельцем. Git не изменён.');
+      return;
+    }
+    showPullResult('Выполняется проверенный fetch + fast-forward для ' + repo +
+      ' до ' + preview.targetSha + '. Не повторяйте Pull до результата.');
+    submitted = true;
+    const receipt = await jsonResponse(await fetch(prefix + '/pull-execute', {
+      method: 'POST', headers,
+      body: JSON.stringify({previewId: preview.previewId, confirm: 'PULL_WINDOWS_MAIN'}),
+      cache: 'no-store'
+    }));
+    if (receipt.state === 'EXECUTED' && receipt.head === preview.targetSha) {
+      showPullResult('Windows Pull выполнен: ' + repo + ' → ' + receipt.head +
+        '. Request ID: ' + requestId + '. Проверяю итоговое состояние…');
+      try {
+        const refreshed = await jsonResponse(await fetch(prefix + '?remote=true', {cache: 'no-store'}));
+        const at = rows.findIndex(row => row.repoId === repo);
+        if (at >= 0) { rows[at] = refreshed.repository; render(); }
+        showPullResult('Windows main обновлён: ' + repo + ' → ' + receipt.head +
+          '. Итоговое состояние проверено. Request ID: ' + requestId);
+      } catch (error) {
+        showPullResult('Windows main обновлён: ' + repo + ' → ' + receipt.head +
+          '. Повторное чтение состояния не удалось: ' + error.message +
+          '. Обновите список вручную. Request ID: ' + requestId);
+      }
+    } else {
+      showPullResult('Windows Pull не подтверждён. Состояние: ' + receipt.state +
+        ', ошибка: ' + (receipt.error || 'нет подтверждённого результата') +
+        '. Request ID: ' + requestId +
+        '. НЕ повторяйте команду; сначала проверьте Windows main и receipt.');
+    }
+  } catch (error) {
+    let observed = '';
+    if (submitted && requestId) {
+      try {
+        const receipt = await jsonResponse(await fetch('/api/v1/repositories/' +
+          encodeURIComponent(repo) + '/pull-results/' + encodeURIComponent(requestId),
+          {cache: 'no-store'}));
+        observed = '. Проверка receipt: ' + receipt.state +
+          (receipt.head ? ' / ' + receipt.head : '') + (receipt.error ? ' / ' + receipt.error : '');
+      } catch (ignored) { observed = '. Receipt недоступен'; }
+    }
+    showPullResult('Pull Windows для ' + repo + ': ' + error.message + observed +
+      (submitted ? '. НЕ повторяйте автоматически; проверьте фактический SHA и receipt. Request ID: ' + requestId :
+        '. Git не запускался через этот запрос.'));
+  } finally {
+    pullBusy = false;
+    setBusy(false);
+    render();
+  }
+}
 $('tab-row').onclick = () => activateTab('row');
 $('tab-worktrees').onclick = () => activateTab('worktrees');
 $('copy-details').onclick = copyDetails;
@@ -309,14 +411,18 @@ $('local').onclick = loadLocal;
 $('remote').onclick = () => checkRemote(true);
 $('selected-remote').onclick = () => checkRemote(false);
 $('cancel').onclick = () => { if (checkController) checkController.abort(); };
+$('pull-windows').onclick = pullWindows;
 async function initialize() {
   $('copy-details').disabled = true;
   $('selected-remote').disabled = true;
+  $('pull-windows').disabled = true;
   activateTab('row');
   try {
     const response = await fetch('/api/v1/capabilities', {cache: 'no-store'});
     const caps = await response.json();
-    if (!response.ok || caps.readOnly !== true) throw new Error('READONLY_CAPABILITY_NOT_VERIFIED');
+    if (!response.ok || !caps.browserPull || caps.browserPull.mode !== 'local_owner_confirm')
+      throw new Error('BROWSER_CAPABILITY_NOT_VERIFIED');
+    browserPullEnabled = caps.browserPull.configured === true;
   } catch (error) {
     $('banner').textContent = 'API read-only capability не подтверждена: ' + error.message;
     return;

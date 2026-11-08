@@ -13,7 +13,7 @@
       <button id="selected-remote">Проверить выбранный</button>
       <button id="remote">Проверить все</button>
       <button id="local">Обновить список</button>
-      <button id="pull-windows" disabled title="Windows Pull из Browser UI пока не подключён к owner-approved Gateway backend">Pull Windows</button>
+      <button id="pull-windows" disabled title="Ручной Pull Windows main: предварительная проверка и подтверждение точного SHA">Pull Windows</button>
       <button id="cancel" disabled>Отмена проверки</button>
     </div>
   </header>
@@ -44,6 +44,7 @@
       </table>
     </div>
     <div id="banner" role="status" aria-live="polite">Загрузка репозиториев…</div>
+    <div id="pull-result" role="status" aria-live="polite" hidden></div>
     <div class="detail-toolbar" role="tablist" aria-label="Сведения о выбранном репозитории">
       <button id="tab-row" role="tab" aria-selected="true" aria-controls="panel-row" class="active">Строка</button>
       <button id="tab-worktrees" role="tab" aria-selected="false" aria-controls="panel-worktrees">Worktrees</button>

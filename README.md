@@ -32,9 +32,9 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 
 [Detailed Mirror workflow and security behavior](docs/WORKFLOW.md).
 
-## API-first browser source candidate (not yet installed)
+## API-first browser source (Windows owner acceptance is separate)
 
-The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). Its primary view now follows the WinForms-style **13-column Docker/GitHub/Windows repository table**, with a full-copyable **«Строка»** lower panel and an optional **«Worktrees»** lower table for the selected primary repository. It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (live token-scoped multi-repo access). The Gateway-side Mirror `pull_main` provider exists only as untracked source in `fortis-approvals` task `mirror-provider-20261107` (not in Gateway `main`, not registered or deployed) and still requires a Gateway-managed merge receipt incompatible with owner GitHub UI merge; see [API-FIRST](docs/API-FIRST.md). WebAuthn/TLS/Windows Pull acceptance is **pending**. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
+The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). Its primary view now follows the WinForms-style **13-column Docker/GitHub/Windows repository table**, with a full-copyable **«Строка»** lower panel and an optional **«Worktrees»** lower table for the selected primary repository. It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (live token-scoped multi-repo access). The Gateway-side Mirror `pull_main` provider exists only as untracked source in `fortis-approvals` task `mirror-provider-20261107` (not in Gateway `main`, not registered or deployed) and still requires a Gateway-managed merge receipt incompatible with owner GitHub UI merge; see [API-FIRST](docs/API-FIRST.md). Gateway ASK/WebAuthn/TLS and live Windows Pull acceptance are **pending**. Source includes an independent owner-local Browser Pull path with exact-SHA confirmation, not a Gateway ASK. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
 
 ## Windows
 
@@ -52,10 +52,15 @@ checks happen only after clicking a check button.
 
 ## GitHub publication and legacy compatibility
 
-For this source candidate, **all GitHub network effects and reads run through the
-existing typed Fortis Gateway client**, with exact task/head preconditions and
-provider credentials confined to Gateway. Browser UI routes are **read-only**;
-there is no Stage/Commit/Push write endpoint or owner Git allowlist. The retained
+GitHub PR/CI/main reads and Docker GitHub publication use the existing typed
+Fortis Gateway client, with provider credentials confined to Gateway. The
+Browser UI offers one **owner-local Windows main Pull** route: protected
+Preview + exact-SHA confirmation + restricted `PullWorker` (`git fetch` followed
+by `merge --ff-only` on the Windows receiver). This is not a GitHub PR/push route,
+not a Gateway ASK, and it never writes Docker Git state. Other Browser Git writes
+(Stage/Commit/Push) remain absent. Local Pull requires a fresh Gateway-read GitHub
+main, matching clean Docker main and clean Windows main, matching origin and
+verified fast-forward **after** fetching the pinned SHA. The retained
 WinForms source and `tools/Docker-Mirror-Git-Actions.py` still support local
 stage/commit logic, but the helper fails closed on network GitHub fetch,
 `ls-remote` and push. Do not attempt to recover the old PAT helper as a bypass.
@@ -69,7 +74,7 @@ From the Docker project directory:
 python3 -B -m unittest -q test_mirror_workflow_source test_mirror_docker_actions
 ```
 
-The Windows compilation test must also pass on an actual Windows system.
+Offline Browser Pull security and idempotence checks run in `test_mirror_browser_pull.py`; the Node fixture tests cancel/confirm. The Windows compilation test must also pass on an actual Windows system.
 Windows PowerShell 5.1 compilation and GUI behavior still require owner
 verification on Windows after the two repository updates.
 

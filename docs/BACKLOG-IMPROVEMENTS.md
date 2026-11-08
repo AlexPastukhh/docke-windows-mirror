@@ -8,8 +8,13 @@
   проверка и freshness/error cases пока не подтверждены owner-run результатом.
   Повторяемая процедура — [MANUAL-PREVIEW](MANUAL-PREVIEW.md); результат проверки
   не подменяется наличием кода или CI.
-- TLS/credential/receipt lifecycle для Gateway ↔ Windows listener, реальные
-  fast-forward/reject/replay проверки и guarded Pull требуют отдельного acceptance.
+- Source для owner-local **Browser Pull Windows main** с одноразовым Preview,
+  CSRF, привязкой полного SHA, `git fetch` + `merge --ff-only` и SQLite receipt
+  требует отдельного owner-run Windows acceptance: штатный fast-forward и
+  отказы на dirty/ahead/diverged/Gateway unavailable, а также readback/replay.
+  Наличие тестов на Linux не подтверждает Windows Git/NTFS/GCM.
+- TLS/credential/receipt lifecycle для **отдельного Gateway ↔ Windows listener**,
+  реальные fast-forward/reject/replay проверки и AI ASK Pull требуют отдельного acceptance.
   Mirror-provider остаётся **untracked source** в `fortis-approvals`
   `task/mirror-provider-20261107`, отсутствует в принятом Gateway `main`,
   не активирован. В нём `pull_main` всё ещё требует `mergeRequestId` от
@@ -23,7 +28,7 @@
   **Не активировать** исходную версию provider до переработки.
 - Windows service packaging/lifecycle, WinForms retirement и остальные UI actions
   (PR creation/Ready, CI controls, submission of Gateway ASK) не входят в
-  подтверждённый read-only browser контракт. Выбирать необходимый следующий scope
+  подтверждённый Browser контракт (чтение + owner-local Pull Windows main). Выбирать необходимый следующий scope
   отдельно, не объявлять весь API-first specification завершённым.
 
 ## Приоритеты
@@ -35,8 +40,9 @@
 - Проверить на реальной Windows принятый Browser UI: в основной 13-колоночной
   таблице только primary; нижние вкладки «Строка» (копирование полного блока)
   и «Worktrees» (отдельные linked worktrees). Browser Stage/Commit/Push
-  отключены, Windows Pull не активирован. При ambiguous status — STOP.
-- Дать owner-run Windows PowerShell 5.1 **read-only Preview → exact-SHA fast-forward Apply** только для заранее принятого GitHub main, без reset/clean, повторной регистрации или прежнего PAT fallback.
+  отключены; owner-local Pull — отдельная операция с подтверждением,
+  Gateway ASK Pull не активирован. При ambiguous status — STOP.
+- Принять на реальной Windows owner-run Browser Pull: **read-only Preview → exact-SHA fast-forward Apply** только для GitHub main, принятого владельцем и совпадающего с Docker primary main. Без reset/clean, повторной регистрации или прежнего PAT fallback.
 - Добавить проверку свежести результатов и обозначение `UNKNOWN`, `REMOTE_DENIED`, `DIRTY`, `NOT_MAIN`, вместо ложного «актуален» по одному локальному SHA. Учесть GitHub token-scoped repo list: наличие Docker checkout не гарантирует доступ.
 - Автоматизировать source/static tests и безопасный Windows compile preflight; не имитировать Windows WinForms и файловые ACL внутри Linux. Host-only команды через общий UC-CONT-025.
 

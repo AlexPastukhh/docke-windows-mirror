@@ -1,8 +1,9 @@
 """Restricted Windows fast-forward worker with durable no-blind-retry receipts.
 
-All mutations originate from the authenticated Gateway listener, never the
-browser. Credential for private Git fetch is the owner's existing Windows Git
-authorization; Gateway's GitHub PAT is never copied here.
+Mutations originate either from a separate authenticated Gateway listener
+or from an explicit owner-local browser preview + confirmation. Both call the
+same restricted executor. A private Git fetch uses the owner's existing Windows
+Git authorization; Gateway GitHub credentials are never copied here.
 """
 import json
 import os
@@ -130,6 +131,10 @@ class PullWorker:
         primary = next((row for row in registered if row.get("kind") == "primary"), None)
         if primary is None or primary.get("origin") != origin:
             raise PullDenied("DOCKER_ORIGIN_MISMATCH")
+        if (primary.get("branch") != "main" or primary.get("clean") is not True or
+                primary.get("targetEligible") is not True or
+                primary.get("head") != p["targetSha"]):
+            raise PullDenied("DOCKER_MAIN_NOT_AT_TARGET")
         current = windows_status(self.mirror.windows_root, repo, origin)
         if (current["error"] or current["branch"] != "main" or
                 current["clean"] is not True or current["head"] != p["expectedHead"] or
