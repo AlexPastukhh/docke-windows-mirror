@@ -54,8 +54,7 @@ const fixture = (name, head, task, opts = {}) => ({
 const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: false});
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
 let clipboard = null;
-let confirmed = false, pulled = false;
-const confirmations = [];
+let pulled = false;
 const requests = [], requestOptions = [];
 const fetch = async (url, options = {}) => {
   requests.push(url); requestOptions.push(options);
@@ -91,7 +90,7 @@ const sandbox = vm.createContext({
   document: {getElementById: key => elements[key], createElement: tag => new Element(tag)},
   navigator: {clipboard: {writeText: async value => { clipboard = value; }}},
   fetch, console, AbortController, Map, Promise,
-  window: {confirm: text => { confirmations.push(text); return confirmed; }}
+  window: {confirm: () => { throw Error('Unexpected second confirmation modal'); }}
 });
 vm.runInContext(source, sandbox, {filename: 'app.js'});
 (async () => {
@@ -134,15 +133,6 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.match(elements['row-full'].textContent, /РАВЕН GITHUB/);
   assert.equal(elements['pull-windows'].disabled, false, 'Manual Pull is enabled on selected row');
   await elements['pull-windows'].onclick();
-  assert.equal(confirmed, false);
-  assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 0,
-    'Owner cancel must never execute Git');
-  assert.match(elements['pull-result'].textContent, /отменён владельцем/);
-  assert.ok(confirmations[0].includes(sha('d')), 'Confirmation shows full pinned target SHA');
-  assert.ok(confirmations[0].includes('после fetch нужен строго fast-forward'),
-    'Unknown ancestry must be disclosed before owner authorization');
-  confirmed = true;
-  await elements['pull-windows'].onclick();
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 1,
     'Explicit owner approval triggers exactly one Execute');
   assert.match(elements['pull-result'].textContent, /Windows main обновлён/);
@@ -150,7 +140,7 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['primary-rows'].children.length, 2);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   const previewOptions = requestOptions.filter((_, index) => requests[index].endsWith('/pull-preview'));
-  assert.equal(previewOptions.length, 2);
+  assert.equal(previewOptions.length, 1);
   assert.ok(previewOptions.every(opt => opt.method === 'POST' && opt.headers['X-CSRF-Token'] === 'fixture-csrf'));
   console.log('MIRROR_PRIMARY_TABLE_SMOKE_PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});

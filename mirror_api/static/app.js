@@ -338,24 +338,11 @@ async function pullWindows() {
       return;
     }
     requestId = preview.requestId;
-    const conditional = preview.fastForward === 'TO_BE_VERIFIED_AFTER_FETCH';
-    const summary = [
-      'Репозиторий: ' + repo,
-      'Windows main: ' + preview.windowsHead,
-      'GitHub main:  ' + preview.targetSha,
-      'Docker main:  ' + preview.dockerHead,
-      'Origin: ' + preview.origin,
-      'Проверка истории: ' + (conditional ?
-        'до fetch направление неизвестно; после fetch нужен строго fast-forward' : 'behind, подтверждено'),
-      'Обязательный CI: ' + preview.requiredCI + ' (ручной просмотр/решение владельца)',
-      'Без reset, stash, переключения веток и запуска сервисов.',
-      'Подтвердить один Pull Windows main до указанного SHA?'
-    ].join('\n');
-    showPullResult('Preview готов. Подтвердите точный SHA в диалоге для ' + repo + '.');
-    if (!window.confirm(summary)) {
-      showPullResult('Pull Windows main для ' + repo + ' отменён владельцем. Git не изменён.');
-      return;
-    }
+    // The owner's click on Pull Windows is the confirmation. Do not show a
+    // second browser modal. Preserve the one-use server-side Preview → Execute
+    // protocol and its fresh SHA/origin/clean/fast-forward preconditions.
+    showPullResult('Проверки пройдены: ' + repo + ' · Windows ' + preview.windowsHead +
+      ' → GitHub ' + preview.targetSha + '. Начинаю guarded fast-forward…');
     showPullResult('Выполняется проверенный fetch + fast-forward для ' + repo +
       ' до ' + preview.targetSha + '. Не повторяйте Pull до результата.');
     submitted = true;
