@@ -10,8 +10,8 @@
   <header class="topbar">
     <h1>Docker → GitHub → Windows <span>· репозитории из Docker</span></h1>
     <div class="toolbar" role="toolbar" aria-label="Проверки репозиториев">
-      <button id="selected-remote" title="Docker, Windows и GitHub для выбранного репозитория">Проверить выбранный</button>
-      <button id="remote">Проверить все</button>
+      <button id="selected-remote" title="Быстро проверить Docker, Windows и GitHub main для выбранного репозитория; PR/CI проверяются отдельно во вкладке Worktrees">Проверить выбранный</button>
+      <button id="remote" title="Быстро проверить Docker, Windows и GitHub main для всех репозиториев">Проверить все</button>
       <button id="local" title="Перечитать Docker/Windows без обращения к GitHub">Обновить Docker/Windows</button>
       <button id="pull-windows" disabled title="Ручной Pull Windows main: предварительная проверка и подтверждение точного SHA">Pull Windows</button>
       <button id="cancel" disabled>Отмена проверки</button>
@@ -20,19 +20,19 @@
   <main>
     <div class="table-title">
       <strong>Основные репозитории</strong>
-      <span>Одна строка на Docker primary · task worktrees только в нижней вкладке</span>
       <span id="count" class="count"></span>
     </div>
     <div class="table-controls" aria-label="Вид таблицы">
-      <button type="button" id="toggle-docker" aria-pressed="true" title="Свернуть или развернуть все столбцы Docker">Docker: скрыть</button>
-      <button type="button" id="toggle-windows" aria-pressed="true" title="Свернуть или развернуть все столбцы Windows">Windows: скрыть</button>
       <label class="filter-label" for="repo-filter">Поиск</label>
       <input id="repo-filter" type="search" placeholder="Название репозитория" autocomplete="off" aria-label="Поиск репозитория">
       <label class="attention-label"><input id="only-attention" type="checkbox"> Требуют внимания</label>
       <button type="button" id="reset-columns" title="Вернуть начальную ширину столбцов">Сбросить ширину</button>
-      <span class="resize-hint">Граница заголовка — изменить ширину; двойной щелчок — сбросить</span>
     </div>
     <div class="table-scroll" id="main-scroll" role="region" aria-label="Таблица основных репозиториев" tabindex="0">
+      <div id="group-controls" class="group-controls" aria-label="Свернуть колонки Docker и Windows">
+        <button type="button" id="toggle-docker" aria-pressed="true" title="Свернуть или развернуть все столбцы Docker">Docker: скрыть</button>
+        <button type="button" id="toggle-windows" aria-pressed="true" title="Свернуть или развернуть все столбцы Windows">Windows: скрыть</button>
+      </div>
       <table class="main-table" id="main-table">
         <colgroup id="main-cols"></colgroup>
         <thead><tr id="main-headers">
@@ -69,7 +69,11 @@
       <pre id="row-full" class="detail-text" tabindex="0"></pre>
     </section>
     <section id="panel-worktrees" role="tabpanel" aria-labelledby="tab-worktrees" class="detail-panel" hidden>
-      <p class="worktree-note">Только зарегистрированные Docker linked worktrees выбранного репозитория. Основной clone показан в верхней таблице. Выбор строки ничего не переключает в Git.</p>
+      <p class="worktree-note">Здесь отображаются Docker linked worktrees. Выбор не переключает Git-ветку.</p>
+      <div class="worktree-check-controls">
+        <button id="check-worktree-details" type="button" title="Отдельная подробная проверка PR и CI по точным SHA веток через Fortis Gateway">Проверить PR/CI</button>
+        <span id="worktree-check-status">PR и CI ещё не проверены</span>
+      </div>
       <div class="worktree-scroll" role="region" aria-label="Таблица Docker worktrees" tabindex="0">
         <table class="worktree-table">
           <thead><tr><th>Ветка</th><th>HEAD</th><th>GitHub SHA</th><th>GitHub</th><th>Изменения</th><th>PR</th><th>CI</th><th>Путь</th></tr></thead>

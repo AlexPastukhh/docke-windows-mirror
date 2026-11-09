@@ -130,11 +130,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path.startswith("/api/v1/repositories/"):
             name = url.path.removeprefix("/api/v1/repositories/")
-            if not REPO.fullmatch(name) or url.query not in ("", "remote=true"):
+            if not REPO.fullmatch(name) or url.query not in ("", "remote=true", "remote=details"):
                 self.send(HTTPStatus.BAD_REQUEST, {"error": "REPOSITORY_QUERY_INVALID"})
                 return
             try:
-                data = self.server.mirror.inventory(remote=url.query=="remote=true", repo=name)
+                data = self.server.mirror.inventory(remote=url.query in ("remote=true", "remote=details"),
+                    repo=name, **({"details": True} if url.query == "remote=details" else {}))
             except ObservationError as exc:
                 self.send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
                 return
