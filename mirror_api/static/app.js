@@ -79,6 +79,16 @@ function applyLayout() {
     if (handle) handle.setAttribute('aria-valuenow', String(width));
   });
   $('main-table').style.width = total + 'px';
+  // These buttons live in a thin bar immediately ABOVE the first Docker and
+  // Windows table columns (not in hidden THs). Keep them available when one
+  // or both groups are collapsed: the owner must always be able to reopen.
+  const repoWidth = layout.widths[0];
+  const dockerWidth = layout.widths.slice(1, 6).reduce((sum, width) => sum + width, 0);
+  const dockerLeft = repoWidth;
+  const windowsLeft = repoWidth + (layout.docker ? dockerWidth : 132);
+  $('toggle-docker').style.left = dockerLeft + 'px';
+  $('toggle-windows').style.left = windowsLeft + 'px';
+  $('group-controls').style.width = Math.max(total, windowsLeft + 138) + 'px';
   for (const tr of $('primary-rows').children) {
     if (tr.children.length === 1) {
       tr.children[0].colSpan = MAIN_COLUMNS.filter((_, index) => columnVisible(index)).length;
@@ -263,6 +273,11 @@ function rowDetails(row) {
       row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
       ' · окончательное решение принимает только свежий серверный Preview',
+    'Время чтения (мс): Docker ' + show(row.readTimingsMs && row.readTimingsMs.dockerInventory) +
+      ', Windows Git ' + show(row.readTimingsMs && row.readTimingsMs.windowsGit) +
+      ', Gateway ' + show(row.readTimingsMs && row.readTimingsMs.githubGateway) +
+      ', Git-история ' + show(row.readTimingsMs && row.readTimingsMs.gitAncestry),
+    'Gateway этапы (мс): ' + (gh.gatewayTimingsMs ? JSON.stringify(gh.gatewayTimingsMs) : 'НЕ ПРОВЕРЕНЫ'),
     'Локальная проверка Windows: ' + show(w.checkedAt),
     'Проверка GitHub: ' + (row.remoteCheckError ? 'ОШИБКА: ' + row.remoteCheckError :
       ghChecked(row) ? show(row.remoteCheckedAt || gh.checkedAt) : 'НЕ ПРОВЕРЕН'),
@@ -353,11 +368,15 @@ function render() {
   renderWorktrees(chosen);
   $('copy-details').disabled = !chosen;
   $('selected-remote').disabled = !chosen || !!checkController || pullBusy;
+  $('check-worktree-details').disabled = !chosen || !!checkController || pullBusy;
   $('pull-windows').disabled = !chosen || !!checkController || pullBusy ||
     !browserPullEnabled || !!lastPullReceipt || !pullEligible(chosen);
 }
 function renderWorktrees(row) {
   const body = $('worktree-rows'); body.replaceChildren();
+  $('worktree-check-status').textContent = !row ? 'Выберите репозиторий' :
+    row.worktreeCheckedAt ? 'Подробные PR/CI проверены: ' + row.worktreeCheckedAt :
+      'PR/CI не проверены: нажмите «Проверить PR/CI» для точных сведений';
   if (!row) { $('worktree-full').textContent = 'Выберите основной репозиторий.'; return; }
   const tasks = (row.docker && row.docker.worktrees || []).filter(tree => tree.kind === 'worktree');
   let selected = selectedWorktrees.get(row.repoId);
@@ -407,6 +426,7 @@ function setBusy(busy) {
   $('local').disabled = busy;
   $('remote').disabled = busy;
   $('selected-remote').disabled = busy || !active;
+  $('check-worktree-details').disabled = busy || !active;
   const current = rows.find(row => row.repoId === active);
   $('pull-windows').disabled = busy || !active || !browserPullEnabled ||
     !!lastPullReceipt || !pullEligible(current);
@@ -434,25 +454,27 @@ async function loadLocal() {
     $('banner').textContent = 'Не удалось обновить Docker/Windows: ' + error.message + ' · предыдущие результаты сохранены';
   } finally { setBusy(false); }
 }
-async function checkRemote(all) {
-  if (checkController || pullBusy || !rows.length || (!all && !active)) return;
+async function checkRemote(all, details = false) {
+  if (checkController || pullBusy || !rows.length || (!all && !active) || (all && details)) return;
   const names = all ? rows.map(row => row.repoId) : [active];
   checkController = new AbortController();
   const signal = checkController.signal;
   setBusy(true);
   let index = 0, completed = 0, errors = 0;
-  $('banner').textContent = 'Проверяю GitHub/Gateway: 0 из ' + names.length;
+  const started = Date.now();
+  $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main') + ': 0 из ' + names.length;
   const worker = async () => {
     while (index < names.length && !signal.aborted) {
       const name = names[index++];
       try {
-        const response = await fetch('/api/v1/repositories/' + encodeURIComponent(name) + '?remote=true',
-          {cache: 'no-store', signal});
+        const response = await fetch('/api/v1/repositories/' + encodeURIComponent(name) +
+          (details ? '?remote=details' : '?remote=true'), {cache: 'no-store', signal});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
         const at = rows.findIndex(row => row.repoId === name);
         if (at >= 0) {
           data.repository.remoteCheckedAt = data.checkedAt;
+          data.repository.worktreeCheckedAt = details ? data.checkedAt : null;
           data.repository.remoteCheckError = null;
           rows[at] = data.repository;
           render();
@@ -470,17 +492,22 @@ async function checkRemote(all) {
         if (!signal.aborted) {
           completed++;
           $('banner').textContent = 'Проверено ' + completed + ' из ' + names.length +
-            ', ошибок запросов ' + errors + ' · ' + name;
+            ', ошибок запросов ' + errors + ' · ' + name +
+            ' · ' + ((Date.now() - started) / 1000).toFixed(1) + ' с';
         }
       }
     }
   };
   try {
-    await Promise.all(Array.from({length: Math.min(4, names.length)}, worker));
+    // The fast owner check uses only one fresh typed branch read per repo.
+    // Four independent repositories were verified simultaneously on the
+    // live typed Gateway without the earlier PR-details fanout overload.
+    // Detailed PR/CI is always explicitly per selected repository.
+    await Promise.all(Array.from({length: Math.min(details ? 1 : 4, names.length)}, worker));
     $('banner').textContent = signal.aborted ?
       'Проверка отменена; обработанные строки и сведения сохранены.' :
       'Проверка завершена: ' + completed + ' из ' + names.length + ', ошибок запросов ' + errors +
-        '. Отдельные ошибки Gateway смотрите в нижнем блоке.';
+        ', время ' + ((Date.now() - started) / 1000).toFixed(1) + ' с. Отдельные ошибки Gateway смотрите в нижнем блоке.';
   } finally { checkController = null; setBusy(false); }
 }
 function showPullResult(message) {
@@ -626,11 +653,13 @@ $('check-pull-result').onclick = verifyPullResult;
 $('local').onclick = loadLocal;
 $('remote').onclick = () => checkRemote(true);
 $('selected-remote').onclick = () => checkRemote(false);
+$('check-worktree-details').onclick = () => checkRemote(false, true);
 $('cancel').onclick = () => { if (checkController) checkController.abort(); };
 $('pull-windows').onclick = pullWindows;
 async function initialize() {
   $('copy-details').disabled = true;
   $('selected-remote').disabled = true;
+  $('check-worktree-details').disabled = true;
   $('pull-windows').disabled = true;
   activateTab('row');
   setupColumns();

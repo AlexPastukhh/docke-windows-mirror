@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 
 REPO = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}\Z")
@@ -114,7 +115,7 @@ def windows_status(base, repo_id, expected_origin):
     return result
 
 
-def github_main(repo_id, origin):
+def github_main(repo_id, origin, *, worktree_branches=None, details=True):
     """Typed Gateway-only metadata. Invalid/mismatched origin fails closed."""
     result = dict(source="fortis-gateway", checkedAt=checked_at(), repoId=repo_id,
                   head=None, branches={}, pullRequests=None, workflowRuns=None,
@@ -126,26 +127,47 @@ def github_main(repo_id, origin):
     if not match or match.group(1).casefold() != repo_id.casefold():
         result["error"] = "ORIGIN_NOT_ALLOWED"
         return result
-    data = gateway_pr_ci(repo_id)
+    if not details:
+        # Fresh exact main via typed Gateway. PR/CI remain explicitly unknown;
+        # no stale cache or guessed merge evidence enters Pull authorization.
+        data = gateway_pr_ci(repo_id, main_only=True)
+    else:
+        data = gateway_pr_ci(repo_id) if worktree_branches is None else gateway_pr_ci(
+            repo_id, worktree_branches=worktree_branches)
     result.update(head=data["head"], branches=data["branches"],
                   pullRequests=data["pullRequests"], workflowRuns=data["workflowRuns"],
                   checkRuns=data["checkRuns"], readErrors=data["errors"],
-                  truncated=data["truncated"])
+                  truncated=data["truncated"],
+                  gatewayTimingsMs=data.get("timingsMs"))
     if result["head"] is None:
         result["error"] = data["errors"].get("branches", "GATEWAY_MAIN_UNVERIFIED")
     return result
 
 
-def gateway_pr_ci(repo_id):
+def gateway_pr_ci(repo_id, *, worktree_branches=None, main_only=False):
     """Run only the typed authenticated Gateway reader inside Fortis Repo.
 
     Windows has no Gateway machine grant and never receives GitHub tokens.
     """
     if not REPO.fullmatch(repo_id):
         raise ObservationError("REPOSITORY_ID_INVALID")
+    # Only registered local worktree branches need individual closed-PR merge
+    # proof or PR-head check runs. A full per-repo PR list remains available,
+    # but expensive per-PR reads are irrelevant to absent worktrees.
+    args = ["docker", "exec", "-i", "--user", "1000:1000", CONTAINER,
+            "python3", "-B", GITHUB_READER, "--repo", repo_id]
+    if main_only:
+        args.append("--main-only")
+    if worktree_branches is not None:
+        if (type(worktree_branches) not in (list, tuple) or len(worktree_branches) > 100 or
+                any(type(branch) is not str or not re.fullmatch(r"task/[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}", branch)
+                    for branch in worktree_branches)):
+            raise ObservationError("GATEWAY_WORKTREE_BRANCHES_INVALID")
+        args.append("--scope-worktrees")
+        for branch in sorted(set(worktree_branches)):
+            args.extend(["--worktree-branch", branch])
     try:
-        raw = run(["docker", "exec", "-i", "--user", "1000:1000", CONTAINER,
-                   "python3", "-B", GITHUB_READER, "--repo", repo_id], timeout=105)
+        raw = run(args, timeout=105)
         data = json.loads(raw)
         if (type(data) is not dict or data.get("schema") != "fortis.github.mirror.v1"
                 or data.get("repoId") != repo_id or
@@ -300,8 +322,10 @@ class Mirror:
     def __init__(self, windows_root):
         self.windows_root = Path(windows_root).expanduser().resolve()
 
-    def inventory(self, remote=False, repo=None):
+    def inventory(self, remote=False, repo=None, *, details=False):
+        started = time.perf_counter()
         rows = docker_inventory(repo)
+        docker_ms = round((time.perf_counter() - started) * 1000)
         output = {"schemaVersion": 1, "checkedAt": checked_at(), "repositories": [], "errors": []}
         for name, worktrees in sorted(rows.items()):
             if not REPO.fullmatch(name) or not isinstance(worktrees, list):
@@ -312,15 +336,28 @@ class Mirror:
                 output["errors"].append("PRIMARY_MISSING:" + name)
                 continue
             origin = primary.get("origin")
+            local_start = time.perf_counter()
             windows = windows_status(self.windows_root, name, origin)
-            github = github_main(name, origin) if remote else {
+            windows_ms = round((time.perf_counter() - local_start) * 1000)
+            # The Docker inventory is authoritative for visible task rows;
+            # only these branches require extra individual PR/check reads.
+            task_branches = sorted({item.get("branch") for item in worktrees
+                if item.get("kind") == "worktree" and item.get("targetEligible") is True and
+                   type(item.get("branch")) is str and item["branch"].startswith("task/")})
+            remote_start = time.perf_counter()
+            github = github_main(name, origin,
+                worktree_branches=task_branches if details else None,
+                details=details) if remote else {
                 "source": "github", "checkedAt": None, "repoId": name,
                 "head": None, "branches": {}, "pullRequests": None,
                 "workflowRuns": None, "checkRuns": {}, "readErrors": {"gateway":"NOT_CHECKED"},
                 "truncated": {}, "requiredCI": "NOT_CHECKED", "error": "NOT_CHECKED"}
+            gateway_ms = round((time.perf_counter() - remote_start) * 1000) if remote else None
+            relation_start = time.perf_counter()
             if github.get("head") and windows["exists"] and windows["error"] is None:
                 windows["relation"] = relation_to_sha(self.windows_root / name,
                                                         windows["head"], github["head"])
+            relation_ms = round((time.perf_counter() - relation_start) * 1000)
             for worktree in worktrees:
                 branch = worktree.get("branch")
                 remote_sha = github.get("branches", {}).get(branch)
@@ -330,5 +367,7 @@ class Mirror:
                 worktree["pullRequest"], worktree["ci"] = worktree_pr_ci(worktree, github)
             actions = evaluate_actions(windows, github, docker_primary=primary)
             output["repositories"].append({"repoId": name, "docker": {"primary": primary,
-                "worktrees": worktrees}, "windows": windows, "github": github, "actions": actions})
+                "worktrees": worktrees}, "windows": windows, "github": github, "actions": actions,
+                "readTimingsMs": {"dockerInventory": docker_ms, "windowsGit": windows_ms,
+                                  "githubGateway": gateway_ms, "gitAncestry": relation_ms}})
         return output

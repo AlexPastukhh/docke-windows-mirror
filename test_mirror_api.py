@@ -65,6 +65,29 @@ class APIClientTests(unittest.TestCase):
         self.assertEqual([],capabilities['ownerGitRepos'])
         self.assertEqual(403, self.request("GET", "/session?boot=" + self.server.bootstrap_token + "x")[0])
 
+    def test_deep_remote_query_is_explicit_owner_read_only_and_single_repo(self):
+        calls=[]
+        class MirrorFixture:
+            def inventory(self, remote=False, repo=None, *, details=False):
+                calls.append((remote,repo,details))
+                return {'schemaVersion':1,'checkedAt':'2026-11-09T12:00:00Z',
+                        'errors':[],'repositories':[{'repoId':'fixture'}]}
+        self.server.mirror=MirrorFixture()
+        cookie=self.login()
+        for path in ('/api/v1/repositories/fixture?remote=true',
+                     '/api/v1/repositories/fixture?remote=details',
+                     '/api/v1/repositories/fixture'):
+            code,body,*_=self.request('GET',path,cookie)
+            self.assertEqual(200,code,path)
+            self.assertEqual('fixture',json.loads(body)['repository']['repoId'])
+        self.assertEqual([(True,'fixture',False),(True,'fixture',True),
+                          (False,'fixture',False)],calls)
+        self.assertEqual(400,self.request('GET','/api/v1/repositories?remote=details',cookie)[0],
+                         'Bulk deep PR reads are not allowed')
+        self.assertEqual(401,self.request('GET',
+            '/api/v1/repositories/fixture?remote=details')[0],
+            'PR detail read still requires owner session')
+
     def test_optional_open_browser_uses_only_loopback_bootstrap_url(self):
         seen = []
         delivered = threading.Event()

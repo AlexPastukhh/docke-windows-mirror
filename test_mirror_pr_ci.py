@@ -167,6 +167,125 @@ class ClosedPRVerificationTests(unittest.TestCase):
         self.assertFalse(pr['data']['mergeVerified'])
 
 
+class ScopedPerformanceTests(unittest.TestCase):
+    """Select/all checks never make per-PR reads for absent local worktrees."""
+
+    def test_main_only_reads_branches_without_fetching_any_pr_or_ci(self):
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_pull_requests(self,*args,**kwargs):
+                raise AssertionError('Main check must not read PR list')
+            def list_workflow_runs(self,*args,**kwargs):
+                raise AssertionError('Main check must not read CI history')
+            def get_pull_request(self,*args,**kwargs):
+                raise AssertionError('Main check must not read individual PRs')
+            def list_check_runs(self,*args,**kwargs):
+                raise AssertionError('Main check must not read check runs')
+        data=reader.collect(Client(),REPO,worktree_branches=[BRANCH],main_only=True)
+        self.assertEqual(SHA1,data['head'])
+        self.assertEqual({'main':SHA1},data['branches'])
+        self.assertIsNone(data['pullRequests'])
+        self.assertIsNone(data['workflowRuns'])
+        self.assertEqual({},data['checkRuns'])
+        self.assertEqual({},data['errors'])
+        self.assertIn('branches',data['timingsMs'])
+        self.assertNotIn('pullRequests',data['timingsMs'])
+        self.assertFalse(worktree_pr_ci({'branch':BRANCH},data)[1]['requiredGateVerified'],
+                         'Main-only branch snapshot must never imply CI verification')
+
+    def test_no_local_task_skips_closed_detail_and_open_check_without_losing_lists(self):
+        closed={**pull(), 'number': 11, 'state': 'closed', 'merged': False}
+        opened=pull(sha=SHA3)
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1},{'name':BRANCH,'sha':SHA3}]}
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                return {'items':[closed,opened]}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                return {'items':[run(SHA3,2,'success')]}
+            def get_pull_request(self,*args):
+                raise AssertionError('Absent closed PR must not cause N Gateway reads')
+            def list_check_runs(self,*args):
+                raise AssertionError('Absent open PR must not cause N Gateway reads')
+        value=reader.collect(Client(),REPO,worktree_branches=[])
+        self.assertEqual(SHA1,value['head'])
+        self.assertEqual(2,len(value['pullRequests']))
+        self.assertEqual(1,len(value['workflowRuns']))
+        self.assertFalse(value['pullRequests'][0]['mergeVerified'])
+        self.assertEqual({},value['checkRuns'])
+        self.assertEqual({},value['errors'])
+        self.assertIn('total',value['timingsMs'])
+
+    def test_only_current_worktree_closed_pr_is_individually_verified(self):
+        closed={**pull(), 'number': 21, 'state': 'closed', 'merged': False}
+        unrelated={**closed,'number': 22,
+                   'head': {'ref':'task/archive-not-present','sha':SHA3}}
+        class Client:
+            def __init__(self):self.details=[]
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                return {'items':[closed.copy(),unrelated.copy()]}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                return {'items':[]}
+            def get_pull_request(self,repo,number):
+                self.details.append(number)
+                if number!=21:raise AssertionError('Unexpected unrelated PR detail read')
+                return {'pullRequest':{**closed,'merged':True}}
+        client=Client()
+        value=reader.collect(client,REPO,worktree_branches=[BRANCH])
+        self.assertEqual([21],client.details)
+        self.assertTrue(value['pullRequests'][0]['mergeVerified'])
+        self.assertTrue(value['pullRequests'][0]['merged'])
+        self.assertFalse(value['pullRequests'][1]['mergeVerified'])
+        pr,_=worktree_pr_ci({'branch':BRANCH},{**value,'branches':{BRANCH:SHA2}})
+        self.assertEqual('MERGED',pr['status'])
+
+    def test_current_open_worktree_still_reads_exact_head_checks(self):
+        opened=pull(sha=SHA2)
+        class Client:
+            def __init__(self):self.heads=[]
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                return {'items':[opened]}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                return {'items':[run(SHA2,2,'failure')]}
+            def list_check_runs(self,repo,sha):
+                self.heads.append(sha)
+                return {'items':[{'headSha':sha,'name':'Source CI','status':'completed','conclusion':'failure'}],
+                        'totalCount':1}
+        client=Client()
+        value=reader.collect(client,REPO,worktree_branches=[BRANCH])
+        self.assertEqual([SHA2],client.heads)
+        pr,ci=worktree_pr_ci({'branch':BRANCH},{**value,'branches':{BRANCH:SHA2}})
+        self.assertEqual('OPEN',pr['status'])
+        self.assertEqual('OBSERVED_FAILURE',ci['status'])
+        self.assertFalse(ci['requiredGateVerified'])
+
+    def test_three_independent_read_groups_are_concurrent(self):
+        import threading
+        import time
+        class Client:
+            def __init__(self):
+                self.barrier=threading.Barrier(3,timeout=3)
+            def _synced(self):
+                self.barrier.wait()
+            def list_branches(self,repo,*,page,per_page):
+                self._synced()
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_pull_requests(self,repo,*,state,page,per_page):
+                self._synced()
+                return {'items':[]}
+            def list_workflow_runs(self,repo,*,page,per_page):
+                self._synced()
+                return {'items':[]}
+        value=reader.collect(Client(),REPO,worktree_branches=[])
+        self.assertEqual({},value['errors'])
+        self.assertEqual(SHA1,value['head'])
+
+
 class DynamicGatewayTests(unittest.TestCase):
     def test_dynamic_repo_uses_token_scoped_typed_reads(self):
         class Gateway:

@@ -7,6 +7,13 @@ const vm = require('node:vm');
 const ui = path.join(__dirname, '..', 'mirror_api', 'static');
 const html = fs.readFileSync(path.join(ui, 'index.html'), 'utf8');
 const source = fs.readFileSync(path.join(ui, 'app.js'), 'utf8');
+assert.ok(!html.includes('Граница заголовка — изменить ширину; двойной щелчок — сбросить'),
+  'Requested column resize hint is removed');
+assert.ok(!html.includes('Одна строка на Docker primary · task worktrees только в нижней вкладке'),
+  'Requested intro hint is removed');
+assert.ok(html.indexOf('id="group-controls"') > html.indexOf('id="main-scroll"') &&
+  html.indexOf('id="group-controls"') < html.indexOf('id="main-table"'),
+  'Docker/Windows fold controls live immediately above the corresponding table headers');
 const IDs = [...html.matchAll(/\bid="([a-z0-9-]+)"/g)].map(x => x[1]);
 const unique = new Set(IDs);
 assert.equal(unique.size, IDs.length, 'All DOM ids must be unique');
@@ -105,6 +112,12 @@ const fetch = async (url, options = {}) => {
   }
   if (url === '/api/v1/repositories') return {ok: true, json: async () => ({
     checkedAt: '2026-11-08T00:00:00Z', errors: [], repositories: [mirror, approvals]})};
+  if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=details')) {
+    const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=details'.length));
+    return {ok: true, json: async () => ({checkedAt:'2026-11-09T12:00:00Z', repository:
+      fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
+      'reviewed-task', {checked:true,relation:'equal'})})};
+  }
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
     if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Gateway timeout');}
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
@@ -137,6 +150,10 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   const headers = elements['main-headers'].children;
   const columns = elements['main-cols'].children;
   assert.equal(columns.length, 13);
+  assert.equal(elements['toggle-docker'].style.left, '205px',
+    'Docker control above first Docker column');
+  assert.equal(elements['toggle-windows'].style.left, '760px',
+    'Windows control above first Windows column');
   assert.equal(columns[1].style.width, '105px');
   assert.equal(columns[5].style.width, '113px');
   assert.equal(columns[9].style.width, '155px');
@@ -144,6 +161,8 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   elements['toggle-docker'].onclick();
   assert.equal(headers[1].hidden, true);
   assert.equal(headers[6].hidden, false);
+  assert.equal(elements['toggle-windows'].style.left, '337px',
+    'Collapsed Docker control remains available before visible Windows group');
   assert.equal(headers[11].hidden, false);
   elements['toggle-windows'].onclick();
   assert.equal(headers[1].hidden, true);
@@ -199,6 +218,12 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['worktree-rows'].children.length, 1, 'Only one linked worktree, no primary');
   assert.match(elements['worktree-full'].textContent, /task\/my-task/);
   assert.match(elements['worktree-full'].textContent, /PR номер: 7/);
+  assert.match(elements['worktree-check-status'].textContent, /не проверены/,
+    'Primary row listing does not imply fresh PR/CI verification');
+  await elements['check-worktree-details'].onclick();
+  assert.ok(requests.includes('/api/v1/repositories/docke-windows-mirror?remote=details'),
+    'Owner can opt in to complete worktree PR/CI inspection');
+  assert.match(elements['worktree-check-status'].textContent, /Подробные PR\/CI проверены/);
   await elements['copy-details'].onclick();
   assert.equal(clipboard, elements['worktree-full'].textContent, 'Copy entire selected worktree detail block');
   list[1].onclick();
@@ -209,6 +234,8 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   const check = elements['selected-remote'].onclick();
   await check;
   assert.ok(requests.includes('/api/v1/repositories/fortis-approvals?remote=true'));
+  assert.ok(!requests.includes('/api/v1/repositories/fortis-approvals?remote=details'),
+    'Check selected does not fan out slow PR/CI inspection');
   assert.equal(elements['primary-rows'].children.length, 2, 'Remote refresh does not add task rows');
   assert.equal(elements['primary-rows'].children[1].classList.contains('selected'), true);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');

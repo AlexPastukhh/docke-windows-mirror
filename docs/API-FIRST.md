@@ -157,7 +157,52 @@ Git or Gateway; invalid/out-of-range persisted widths are rejected. Search and
 "Требуют внимания" are view-only and do not change the underlying rows or Git
 state. The GitHub check failure explicitly invalidates the corresponding
 row's remote freshness; local refresh intentionally marks remote data as not
-checked. Source timestamps are shown in the selected row's detail block.
+checked. Source timestamps are shown in the selected row's detail block. Group
+folding buttons are placed directly above the first respective Docker/Windows
+column and remain visible even when both groups are hidden. The redundant
+header guidance lines are removed.
+
+## Fast primary inspection and explicitly detailed worktree PR/CI
+
+The owner **«Проверить выбранный»** and **«Проверить все»** call the same
+read-only `?remote=true` repository endpoint for one or up to four repositories
+concurrently. For each repo, Docker inventory, Windows Git and a **fresh
+Gateway-verified GitHub `main` branch SHA** are checked. The Gateway reader
+calls only typed `list_branches`; it does not fetch closed PR details, PR lists,
+workflow history or check runs. All local SHA, origin, clean, branch and
+ancestry checks, and owner-local Pull fresh Preview, are unchanged. In this
+mode PR and CI fields remain explicitly `UNVERIFIED` / `NOT_VERIFIED`, never
+silently `NONE`, `MERGED` or `SUCCESS`. The route never caches remote SHA.
+
+The **Worktrees** tab offers **«Проверить PR/CI»** for the selected repository.
+This uses the separate owner-session-protected read-only URL
+`GET /api/v1/repositories/<repo>?remote=details`, not an implicit expensive
+operation for 31 rows. Only this explicit read fetches the full bounded PR and
+Actions lists and per-head check runs. Expensive individual `get_pull_request`
+verification of closed PRs is limited to task branches from the **current
+registered Docker worktree inventory**, preserving precise merged/unmerged
+provenance for visible worktrees without guessing the status of absent ones.
+Three independent read groups (branches, PR list, workflow runs) are issued
+concurrently; individual closed-PR detail reads are independently bounded to
+three. The Gateway remains the sole GitHub read source. Bulk deep inspection
+is explicitly denied; no PR or CI statuses are upgraded without evidence.
+
+The selected-row detail block reports Docker inventory, Windows Git, Gateway
+and ancestry read timings in milliseconds, plus the Gateway reader's per-stage
+durations. The check progress banner reports total elapsed time. These are
+observations, not guarantees of Windows wall-clock timing or GitHub latencies.
+A local Docker exporter scan of 31 repos / 118 worktrees took ~2.8 s in the
+2026-11-09 test environment; Windows Git and actual browser layout must be
+verified on the owner's Windows session.
+
+**Read-only Gateway sample timings (2026-11-09):** before the optimization,
+`docke-windows-mirror` full PR/CI inspection took 28.7 seconds including ten
+sequential closed PR detail reads. After the change, fresh `main`-only reads
+took ~2.0 s per tested repository. Four independent main-only reads completed
+in ~2.2 s with four concurrent Gateway requests. A detailed Worktrees PR/CI
+read is intentionally slower, opt-in, and can return partial/unknown evidence
+if Gateway checks fail. No Git effects are ever performed by these reads.
+
 
 The shared Windows Git observer now reads with the Windows owner's **effective
 system Git config** rather than disabling it with `GIT_CONFIG_NOSYSTEM=1`,
