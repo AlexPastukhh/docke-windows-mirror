@@ -10,9 +10,9 @@
   <header class="topbar">
     <h1>Docker → GitHub → Windows <span>· репозитории из Docker</span></h1>
     <div class="toolbar" role="toolbar" aria-label="Проверки репозиториев">
-      <button id="selected-remote">Проверить выбранный</button>
+      <button id="selected-remote" title="Docker, Windows и GitHub для выбранного репозитория">Проверить выбранный</button>
       <button id="remote">Проверить все</button>
-      <button id="local">Обновить список</button>
+      <button id="local" title="Перечитать Docker/Windows без обращения к GitHub">Обновить Docker/Windows</button>
       <button id="pull-windows" disabled title="Ручной Pull Windows main: предварительная проверка и подтверждение точного SHA">Pull Windows</button>
       <button id="cancel" disabled>Отмена проверки</button>
     </div>
@@ -23,9 +23,19 @@
       <span>Одна строка на Docker primary · task worktrees только в нижней вкладке</span>
       <span id="count" class="count"></span>
     </div>
+    <div class="table-controls" aria-label="Вид таблицы">
+      <button type="button" id="toggle-docker" aria-pressed="true" title="Свернуть или развернуть все столбцы Docker">Docker: скрыть</button>
+      <button type="button" id="toggle-windows" aria-pressed="true" title="Свернуть или развернуть все столбцы Windows">Windows: скрыть</button>
+      <label class="filter-label" for="repo-filter">Поиск</label>
+      <input id="repo-filter" type="search" placeholder="Название репозитория" autocomplete="off" aria-label="Поиск репозитория">
+      <label class="attention-label"><input id="only-attention" type="checkbox"> Требуют внимания</label>
+      <button type="button" id="reset-columns" title="Вернуть начальную ширину столбцов">Сбросить ширину</button>
+      <span class="resize-hint">Граница заголовка — изменить ширину; двойной щелчок — сбросить</span>
+    </div>
     <div class="table-scroll" id="main-scroll" role="region" aria-label="Таблица основных репозиториев" tabindex="0">
       <table class="main-table" id="main-table">
-        <thead><tr>
+        <colgroup id="main-cols"></colgroup>
+        <thead><tr id="main-headers">
           <th>Репозиторий</th>
           <th>Docker · Ветка для просмотра</th>
           <th>Docker · Активная ветка</th>
@@ -45,6 +55,10 @@
     </div>
     <div id="banner" role="status" aria-live="polite">Загрузка репозиториев…</div>
     <div id="pull-result" role="status" aria-live="polite" hidden></div>
+    <div id="receipt-controls" hidden>
+      <button id="check-pull-result" type="button">Проверить результат предыдущего Pull</button>
+      <span>Только чтение исходной квитанции, без нового Git Pull.</span>
+    </div>
     <div class="detail-toolbar" role="tablist" aria-label="Сведения о выбранном репозитории">
       <button id="tab-row" role="tab" aria-selected="true" aria-controls="panel-row" class="active">Строка</button>
       <button id="tab-worktrees" role="tab" aria-selected="false" aria-controls="panel-worktrees">Worktrees</button>

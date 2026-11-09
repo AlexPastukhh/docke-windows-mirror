@@ -2,6 +2,20 @@
 
 **Единый файл будущих улучшений этого репозитория.** Mirror владеет UI, проверкой Docker/GitHub/Windows SHAs и owner-guarded Windows import. Нормативный процесс GitHub → CI → Windows описан только в [`docs/WORKFLOW.md`](WORKFLOW.md) и общем UC-CONT-002; backlog не заменяет runbook и не разрешает mutation.
 
+## Mirror UX / readback — source в task (до merge и Windows acceptance)
+
+- Компактная таблица: независимо сворачиваемые группы Docker/Windows,
+  сохранение размеров каждого столбца в браузере, поиск и фильтр действий,
+  обновление выбранного Gateway-статуса без ложной свежести.
+- Исправление Windows Git `core.autocrlf` (системный config не игнорируется при
+  чтении), сохранение точного porcelain ` M`, повторные **только read-only**
+  проверки после fast-forward, конкретные коды непрошедшего readback и
+  однокнопочное получение прежнего receipt без F12/повторного Git.
+- Источник и Linux/Node-тесты **не доказывают Windows runtime/UX acceptance**.
+  После принятого PR и обновления Windows clone нужно отдельно проверить
+  реальный Browser Mirror, размеры колонок, сохранение после перезапуска
+  браузера, CRLF, `UNCERTAIN` и отсутствие второго Git-эффекта.
+
 ## Не завершённое внедрение и acceptance
 
 - Windows browser/API запуск из принятого `main`, фактическая inventory/PR/CI

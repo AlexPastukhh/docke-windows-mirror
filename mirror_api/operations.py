@@ -38,8 +38,13 @@ def checked_at():
 
 
 def run(argv, timeout=25):
+    # Preserve the Windows owner's effective Git line-ending configuration.
+    # In particular, disabling the system config ignores core.autocrlf=true
+    # from Git for Windows and invents dirty files after a clean ff-only pull.
+    # This path executes read-only Git commands; write authorization remains
+    # restricted to the separate guarded PullWorker.
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
-               GCM_INTERACTIVE="never", GIT_CONFIG_NOSYSTEM="1")
+               GCM_INTERACTIVE="never")
     try:
         p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, env=env, check=False)
@@ -49,7 +54,8 @@ def run(argv, timeout=25):
         raise ObservationError("COMMAND_FAILED")
     if len(p.stdout) > 1000000:
         raise ObservationError("RESPONSE_TOO_LARGE")
-    return p.stdout.decode("utf-8", errors="replace").strip()
+    # Git porcelain's first leading space is significant (" M" != "M ").
+    return p.stdout.decode("utf-8", errors="replace").rstrip("\r\n")
 
 
 def docker_inventory(repo=None):

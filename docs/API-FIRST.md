@@ -124,7 +124,17 @@ branch/HEAD/origin/clean readback. No switch/reset/stash/force/auto-deploy.
 Receipt status is bound to the initiating browser session at
 `GET /api/v1/repositories/<repo>/pull-results/<requestId>`. On `UNCERTAIN` or
 connection loss **do not issue a new Pull automatically**: inspect Windows and
-reconcile/read back the stored result. The browser preview is disabled whenever
+reconcile/read back the stored result. The worker makes three bounded **Git
+status readbacks only** after successful ff-only, never an additional fetch or
+merge. An unconfirmed receipt includes `readbackIssues` (HEAD, branch, dirty,
+origin, or Git error), without leaking file paths. The browser immediately
+re-reads the original receipt once, then offers **«Проверить результат
+предыдущего Pull»** as a read-only action with the original request UUID.
+An unresolved UUID is kept in tab `sessionStorage` across reloads (without
+credentials); the backend's session ownership remains memory-only and does
+**not** survive a Mirror service restart. After process restart, operator
+recovery must use the protected receipt DB, not a new Pull or a bypass of
+browser session binding. The browser preview is disabled whenever
 `--preview-source-task` is used. When the separate Gateway listener is enabled,
 it uses the **same worker and receipt database** as owner-local Pull.
 
@@ -133,6 +143,30 @@ scenarios first, then run a controlled actual fast-forward on a reviewed safe
 repo. Linux offline tests and green CI do not prove Windows credential behavior,
 NTFS writes, Windows error paths, or Script Center lifecycle. Use
 [MANUAL-PREVIEW](MANUAL-PREVIEW.md) for the owner test procedure.
+
+## Browser table layout and consistent Git observation
+
+The primary 13-column table preserves its data contract regardless of visual
+layout. The owner may hide the Docker group, the Windows group, or both; with
+both hidden only repository names remain (Workflow columns also hide). While
+at least one group is visible the Workflow conclusion/action remains visible.
+Every column has a draggable border and keyboard left/right resizing (12 px
+steps); double-click resets one column, **Сбросить ширину** resets all widths.
+Widths and group toggles are stored in browser-local `localStorage`, never in
+Git or Gateway; invalid/out-of-range persisted widths are rejected. Search and
+"Требуют внимания" are view-only and do not change the underlying rows or Git
+state. The GitHub check failure explicitly invalidates the corresponding
+row's remote freshness; local refresh intentionally marks remote data as not
+checked. Source timestamps are shown in the selected row's detail block.
+
+The shared Windows Git observer now reads with the Windows owner's **effective
+system Git config** rather than disabling it with `GIT_CONFIG_NOSYSTEM=1`,
+because `core.autocrlf=true` is commonly configured system-wide by Git for
+Windows. Readback and `git fetch`/`merge --ff-only` thus share the same line-
+ending interpretation; existing Git fsmonitor and interactive prompting
+restrictions stay in place. Porcelain status leading whitespace is preserved.
+This fix is source-tested using a standalone CRLF fixture, but must still be
+accepted on Windows, without overwriting live data.
 
 ## Gateway listener (not deployed)
 
