@@ -197,6 +197,7 @@ function windowsGithub(row) {
   const w = row.windows || {};
   if (!w.exists) return w.error === 'WINDOWS_CLONE_NOT_FOUND' ? 'НЕТ КЛОНА' : 'НЕ ПРОВЕРЕН';
   if (w.error || !w.originValid) return 'ОШИБКА ORIGIN / GIT';
+  if (w.fetchError) return 'ОШИБКА FETCH · ' + w.fetchError;
   if (!ghChecked(row)) return 'НЕ ПРОВЕРЕН';
   if (w.branch !== 'main') return 'WINDOWS: НЕ MAIN';
   switch (w.relation) {
@@ -216,6 +217,7 @@ function overall(row) {
   if (!w.exists) return w.error === 'WINDOWS_CLONE_NOT_FOUND' ?
     ['НЕТ КЛОНА WINDOWS', 'Windows-клон отсутствует'] : ['WINDOWS: НЕ ПРОВЕРЕН', show(w.error)];
   if (w.error || !w.originValid) return ['ОШИБКА WINDOWS', show(w.error || 'ORIGIN НЕ СОВПАДАЕТ')];
+  if (w.fetchError) return ['ОШИБКА FETCH WINDOWS', w.fetchError + ' · Команда Pull не выполнялась'];
   if (w.branch !== 'main') return ['WINDOWS: НЕ MAIN', 'Проверить активную ветку Windows'];
   if (w.clean === false) return ['WINDOWS: ИЗМЕНЕНИЯ', 'Разобрать Windows-файлы; Pull запрещён'];
   if (w.clean !== true) return ['WINDOWS: НЕ ПРОВЕРЕН', 'Проверить git status Windows'];
@@ -273,8 +275,11 @@ function rowDetails(row) {
       row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
       ' · окончательное решение принимает только свежий серверный Preview',
+    'Windows fetch: ' + show(w.fetchStatus) +
+      (w.fetchError ? ' · ' + w.fetchError : ''),
     'Время чтения (мс): Docker ' + show(row.readTimingsMs && row.readTimingsMs.dockerInventory) +
       ', Windows Git ' + show(row.readTimingsMs && row.readTimingsMs.windowsGit) +
+      ', Windows fetch ' + show(row.readTimingsMs && row.readTimingsMs.windowsFetch) +
       ', Gateway ' + show(row.readTimingsMs && row.readTimingsMs.githubGateway) +
       ', Git-история ' + show(row.readTimingsMs && row.readTimingsMs.gitAncestry),
     'Gateway этапы (мс): ' + (gh.gatewayTimingsMs ? JSON.stringify(gh.gatewayTimingsMs) : 'НЕ ПРОВЕРЕНЫ'),
@@ -462,16 +467,22 @@ async function checkRemote(all, details = false) {
   setBusy(true);
   let index = 0, completed = 0, errors = 0;
   const started = Date.now();
-  $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main') + ': 0 из ' + names.length;
-  const worker = async () => {
+  $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main + Windows fetch') + ': 0 из ' + names.length;
+  const worker = async (csrf) => {
     while (index < names.length && !signal.aborted) {
       const name = names[index++];
       try {
-        const response = await fetch('/api/v1/repositories/' + encodeURIComponent(name) +
-          (details ? '?remote=details' : '?remote=true'), {cache: 'no-store', signal});
+        const endpoint = '/api/v1/repositories/' + encodeURIComponent(name);
+        const response = details ?
+          await fetch(endpoint + '?remote=details', {cache: 'no-store', signal}) :
+          await fetch(endpoint + '/check-windows', {
+            method: 'POST', cache: 'no-store', signal,
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: '{}'
+          });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
         const at = rows.findIndex(row => row.repoId === name);
+        if (!details && data.repository.windows && data.repository.windows.fetchError) errors++;
         if (at >= 0) {
           data.repository.remoteCheckedAt = data.checkedAt;
           data.repository.worktreeCheckedAt = details ? data.checkedAt : null;
@@ -484,7 +495,7 @@ async function checkRemote(all, details = false) {
           errors++;
           const at = rows.findIndex(row => row.repoId === name);
           if (at >= 0) {
-            rows[at].remoteCheckError = 'Запрос к Gateway не выполнен';
+            rows[at].remoteCheckError = 'Проверка GitHub / Windows fetch не выполнена';
             render();
           }
         }
@@ -492,22 +503,32 @@ async function checkRemote(all, details = false) {
         if (!signal.aborted) {
           completed++;
           $('banner').textContent = 'Проверено ' + completed + ' из ' + names.length +
-            ', ошибок запросов ' + errors + ' · ' + name +
+            ', ошибок проверки ' + errors + ' · ' + name +
             ' · ' + ((Date.now() - started) / 1000).toFixed(1) + ' с';
         }
       }
     }
   };
   try {
-    // The fast owner check uses only one fresh typed branch read per repo.
-    // Four independent repositories were verified simultaneously on the
-    // live typed Gateway without the earlier PR-details fanout overload.
-    // Detailed PR/CI is always explicitly per selected repository.
-    await Promise.all(Array.from({length: Math.min(details ? 1 : 4, names.length)}, worker));
+    // Owner check may write Windows Git metadata, so use a CSRF-gated POST.
+    // Keep the ordinary GET inventory and detailed PR/CI GET strictly read-only.
+    const csrf = details ? null : (await jsonResponse(await fetch('/api/v1/csrf',
+      {cache: 'no-store', signal}))).csrf;
+    await Promise.all(Array.from({length: Math.min(details ? 1 : 4, names.length)},
+      () => worker(csrf)));
     $('banner').textContent = signal.aborted ?
       'Проверка отменена; обработанные строки и сведения сохранены.' :
-      'Проверка завершена: ' + completed + ' из ' + names.length + ', ошибок запросов ' + errors +
-        ', время ' + ((Date.now() - started) / 1000).toFixed(1) + ' с. Отдельные ошибки Gateway смотрите в нижнем блоке.';
+      'Проверка завершена: ' + completed + ' из ' + names.length + ', ошибок проверки ' + errors +
+        ', время ' + ((Date.now() - started) / 1000).toFixed(1) + ' с. Отдельные ошибки в нижнем блоке.';
+  } catch (error) {
+    if (!signal.aborted) {
+      for (const name of names) {
+        const row = rows.find(item => item.repoId === name);
+        if (row) row.remoteCheckError = 'Проверка не запущена: ' + error.message;
+      }
+      render();
+      $('banner').textContent = 'Не удалось начать проверку: ' + error.message;
+    }
   } finally { checkController = null; setBusy(false); }
 }
 function showPullResult(message) {

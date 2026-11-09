@@ -118,8 +118,17 @@ const fetch = async (url, options = {}) => {
       fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
       'reviewed-task', {checked:true,relation:'equal'})})};
   }
+  if (url.startsWith('/api/v1/repositories/') && url.endsWith('/check-windows')) {
+    assert.equal(options.method, 'POST', 'Owner Git metadata fetch requires POST');
+    assert.equal(options.headers['X-CSRF-Token'], 'fixture-csrf', 'Owner check requires CSRF');
+    assert.equal(options.body, '{}', 'No caller-supplied ref/URL/command');
+    if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Git metadata fetch failure');}
+    const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'/check-windows'.length));
+    return {ok: true, json: async () => ({checkedAt:'2026-11-09T12:00:00Z', repository:
+      fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
+      'updated-task', {checked:true, relation:'equal'})})};
+  }
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
-    if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Gateway timeout');}
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
     return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
       'updated-task', {checked: true, relation: 'equal'})})};
@@ -233,12 +242,23 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   elements['tab-row'].onclick();
   const check = elements['selected-remote'].onclick();
   await check;
-  assert.ok(requests.includes('/api/v1/repositories/fortis-approvals?remote=true'));
+  assert.ok(requests.includes('/api/v1/repositories/fortis-approvals/check-windows'));
+  assert.ok(requests.filter(url => url.endsWith('/check-windows')).every(url =>
+    requestOptions[requests.indexOf(url)].method === 'POST'));
+  assert.ok(requests.includes('/api/v1/csrf'));
   assert.ok(!requests.includes('/api/v1/repositories/fortis-approvals?remote=details'),
     'Check selected does not fan out slow PR/CI inspection');
+  assert.ok(!requests.includes('/api/v1/repositories/docke-windows-mirror/check-windows'),
+    'Check selected does not fetch metadata for other repositories');
   assert.equal(elements['primary-rows'].children.length, 2, 'Remote refresh does not add task rows');
   assert.equal(elements['primary-rows'].children[1].classList.contains('selected'), true);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
+  const beforeAll = requests.filter(url => url.endsWith('/check-windows')).length;
+  await elements['remote'].onclick();
+  const allRequests = requests.filter(url => url.endsWith('/check-windows')).slice(beforeAll);
+  assert.equal(allRequests.length, 2, 'Check all invokes same CSRF POST for both repositories');
+  assert.ok(allRequests.includes('/api/v1/repositories/docke-windows-mirror/check-windows'));
+  assert.ok(allRequests.includes('/api/v1/repositories/fortis-approvals/check-windows'));
   assert.equal(elements['tab-row'].attributes['aria-selected'], 'true');
   assert.match(elements['row-full'].textContent, /РАВЕН GITHUB/);
   elements['only-attention'].checked = true;

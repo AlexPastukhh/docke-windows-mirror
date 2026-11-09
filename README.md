@@ -48,7 +48,11 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\Fortis-Windows-Mi
 Windows runtime requires `docker.exe`, `git.exe`, a running container called
 `fortis-repo-test`, and the matching Docker files at the path above.
 The launcher checks the Docker repo list on startup; GitHub and Windows
-checks happen only after clicking a check button.
+checks happen only after clicking a check button. Browser **Check selected/all**
+uses an owner-session CSRF-protected POST: after the typed Gateway main read it
+may fetch Windows `origin main` Git metadata for a clean registered checkout
+and prove ancestry. It never merges or checks out files. GET observations and
+Worktrees PR/CI detail reads remain read-only; only explicit Pull can fast-forward.
 
 ## GitHub publication and legacy compatibility
 

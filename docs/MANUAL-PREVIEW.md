@@ -2,7 +2,8 @@
 
 Browser UI source is accepted in `main`; owner-local Pull is a separate source
 change requiring merge and Windows owner acceptance. This page owns the
-repeatable read-only inspection and guarded Pull acceptance procedure; actual
+repeatable GET inspection, owner-authorized metadata-fetch checks and guarded
+Pull acceptance procedure; actual
 execution status and unfinished work are kept in the
 [backlog](BACKLOG-IMPROVEMENTS.md), not a second checklist of project tasks here.
 
@@ -36,8 +37,10 @@ From the reviewed Windows clone:
 
 The process serves a local browser UI on loopback and prints a one-use URL.
 Keep the terminal open, use the URL in the owner's Windows browser, stop with
-Ctrl+C. Startup and normal inspections never change Git; **only the explicit
-Pull Windows click → Preview → Execute** can run guarded Windows fetch/fast-forward. The service is temporary, not an installed
+Ctrl+C. Startup and GET observations never modify Git. Explicit
+**«Проверить выбранный/все»** may fetch *Windows Git metadata only* (CSRF POST);
+only **Pull Windows → Preview → Execute** can run guarded fast-forward and
+change checked-out files. The service is temporary, not an installed
 Windows service. Do not share the bootstrap URL or browser cookie.
 
 ## Checklist to record PASS/FAIL + exact mismatch
@@ -63,15 +66,15 @@ Windows service. Do not share the bootstrap URL or browser cookie.
   git -C "$HOME\Repos\docke-windows-mirror" status --short
   ```
 
-- [ ] **PR/CI:** select `fortis-approvals`, open the lower **Worktrees** tab, and explicitly click **«Проверить PR/CI»**. Only then confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses for matching task branch/SHA; links open github.com. **«Проверить выбранный/все»** only rechecks primary Docker/Windows/GitHub main; before the explicit worktree check, PR/CI must remain `UNVERIFIED` (not guessed NONE or SUCCESS). `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
+- [ ] **PR/CI:** select `fortis-approvals`, open the lower **Worktrees** tab, and explicitly click **«Проверить PR/CI»**. Only then confirm PR numbers/title, `MERGED/OPEN/DRAFT`, workflow runs and check statuses for matching task branch/SHA; links open github.com. **«Проверить выбранный/все»** rechecks primary Docker/Windows/GitHub main and may `fetch` Windows Git metadata (never PR/CI); before the explicit worktree check, PR/CI must remain `UNVERIFIED` (not guessed NONE or SUCCESS). `requiredCI: NOT_VERIFIED` is expected: visible successful runs are not a certified approval gate.
 - [ ] **Scope:** select another owner-owned repo and click **Проверить выбранный**. Dynamic Gateway reads are token-scoped; missing permission must show a Gateway read error, **not** a claim there are no PRs or CI.
-- [ ] **Refresh:** **«Обновить Docker/Windows»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use a fresh typed Gateway `main` branch read, not the slow PR/CI detail fanout, and progressively update the table. Open Worktrees and click **«Проверить PR/CI»** separately for deeper data. Review reported per-source durations in the detail block. **«Отмена проверки»** stops the remaining requests; already checked rows remain available.
+- [ ] **Refresh:** **«Обновить Docker/Windows»** reads Docker/Windows without triggering GitHub; **«Проверить выбранный»** and **«Проверить все»** use one CSRF-protected POST per selected repo, a fresh typed Gateway `main` SHA, then bounded Windows `git fetch origin main` when Windows differs and is safe, not the slow PR/CI detail fanout; each repo progressively updates the table. Confirm `Windows fetch: VERIFIED` and `Windows · GitHub: ОТСТАЁТ ОТ GITHUB` for a clean intentionally-behind clone, with unchanged Windows HEAD/files. Open Worktrees and click **«Проверить PR/CI»** separately for deeper data. Review reported per-source durations in the detail block. **«Отмена проверки»** stops remaining requests; a fetch already accepted by the Windows server may still finish. No merge is dispatched by checking.
 - [ ] **Actions:** **«Pull Windows»** is a single-click owner action that triggers fresh server Preview and Execute with no second browser confirmation. Reject/dirty/unknown preflight must make **no Git write**. Browser Stage/Commit/Push routes remain absent; Gateway ASK Pull is **not** activated.
 - [ ] **Pull reject cases (before any real apply):** on a selected repo with dirty/not-main Windows or mismatching origin/dirty Docker, the preview must report blockers. GitHub read failure must deny; if Windows already equals GitHub main, preview must deny as no-op. Do not deliberately dirty a valuable clone merely to test this.
 - [ ] **Controlled Pull (owner-run, safe repo only):** after confirming Docker clean primary `main` and GitHub `main` have the same approved SHA, use an intentionally behind **clean** Windows `main`. Click Pull **once**. Server rechecks the full Windows SHA, GitHub SHA, origin and ancestry (unknown ancestry is verified after fetch). There is no second confirmation dialog. The result must be `EXECUTED` and Windows `main`/origin/clean readback must match; repeat Preview must show `WINDOWS_ALREADY_CURRENT`. A divergent/ahead history must fail without merge. If `UNCERTAIN`, do not retry the Git operation.
 - [ ] **Uncertain readback UX:** verify that the worker retries only *read-only* Windows status after a successful fast-forward (bounded attempts); if still uncertain, its receipt describes which of HEAD/branch/dirty/origin/Git failed. Browser performs one immediate read-only receipt reconciliation and displays **«Проверить результат предыдущего Pull»** until resolved. Reload the tab and verify the same-session request ID is retained in `sessionStorage`; clicking this button must not make a second `pull-execute` call. After an Executor/Mirror process restart the original in-memory owner session is lost: do not treat a new session as authorized to read an earlier receipt; use the protected receipt DB/operator procedure.
 - [ ] **Windows line endings:** on a Windows clone where system Git sets `core.autocrlf=true`, compare `git status --porcelain=v1 --untracked-files=all` with Mirror. A clean checkout containing CRLF must not appear as spurious `M` files. Check that leading spaces in porcelain statuses (for example ` M`) survive unchanged in the UI.
-- [ ] **HTTP contract (optional):** browser developer tools → Network: `/api/v1/repositories`, `/api/v1/repositories/<repo>?remote=true` (main only), and explicit `/api/v1/repositories/<repo>?remote=details` (full PR/CI) return JSON. The all-repo route must reject `remote=details`. Direct requests without an authenticated browser session receive `401`.
+- [ ] **HTTP contract (optional):** browser developer tools → Network: `GET /api/v1/repositories`, `GET /api/v1/repositories/<repo>?remote=true` (read-only main), `POST /api/v1/repositories/<repo>/check-windows` with same-session CSRF and `{}` (Windows Git metadata fetch), and explicit `GET /api/v1/repositories/<repo>?remote=details` (read-only full PR/CI) return JSON. The all-repo route must reject `remote=details`. Direct requests without an authenticated browser session receive `401`.
 - [ ] **Shutdown:** Ctrl+C stops the server. If no Pull was explicitly approved, Windows branch/HEAD and clean status must remain unchanged. A successful approved Pull changes only the selected Windows `main` to its exact target SHA.
 
 <a id="known-limits--diagnostics"></a>

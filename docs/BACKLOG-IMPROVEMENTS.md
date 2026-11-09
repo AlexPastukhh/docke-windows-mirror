@@ -32,6 +32,23 @@
 - В обоих режимах отсутствие Gate/PR/CI подтверждения всегда остаётся UNKNOWN;
   дорогостоящие подробности не появляются автоматически или из кэша.
 
+## Точное направление Windows Git при проверке — source change (2026-11-09)
+
+- При разных Windows и GitHub SHA обычная read-only инвентаризация не может
+  доказать направление без целевого Git-объекта. Кнопки «Проверить выбранный» и
+  «Проверить все» теперь используют отдельный owner-session POST с CSRF,
+  допустимый только в штатном Browser runtime. После Gateway-проверки main
+  выполняется Windows `git fetch origin main` без интерактива (тайм-аут 45 с),
+  проверяется точный `FETCH_HEAD`, HEAD/branch/origin/clean readback и ancestry.
+  Ни checkout, ни merge, ни reset в проверке нет; GET остаются read-only.
+- Если Windows не чистая / не main / origin не совпадает / Docker main не
+  подтверждён — fetch не выполняется. Если fetch не удался, менялся SHA или
+  Windows-клон во время fetch, состояние не объявляется «отстаёт», Pull
+  блокируется до новой проверки. На настоящей Windows остаётся acceptance
+  скорости массовых проверок и отказов в сетевом Git/GCM.
+- Старые числа ~2.0 с на репозиторий измеряли только Gateway, без сетевого
+  Windows fetch. Теперь wall-clock зависит также от сети и объёма Git-объектов.
+
 ## Не завершённое внедрение и acceptance
 
 - Windows browser/API запуск из принятого `main`, фактическая inventory/PR/CI
