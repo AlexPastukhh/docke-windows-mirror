@@ -160,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
             local_pull = self.server.allow_browser_pull and self.server.browser_pull.configured
             operations = ["list_repositories", "get_repository_status", "list_worktrees", "get_available_actions"]
             if local_pull:
-                operations += ["preview_windows_pull", "execute_windows_pull", "read_windows_pull_receipt"]
+                operations += ["check_windows_history", "preview_windows_pull", "execute_windows_pull", "read_windows_pull_receipt"]
             self.send(HTTPStatus.OK, {"schemaVersion": 1,
                 "readOnly": not local_pull,
                 "operations": operations,
@@ -188,12 +188,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send(HTTPStatus.UNAUTHORIZED, {"error": "SESSION_REQUIRED"})
             return
         url = urlsplit(self.path)
-        match = re.fullmatch(r"/api/v1/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})/(pull-preview|pull-execute)", url.path)
+        match = re.fullmatch(r"/api/v1/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})/(check-windows|pull-preview|pull-execute)", url.path)
         if not match or url.query:
             self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "GATEWAY_ONLY_GIT_WRITES"})
             return
         if not self.server.allow_browser_pull:
             self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "BROWSER_PULL_PREVIEW_MODE_DISABLED"})
+            return
+        # Metadata fetch writes Git's objects/FETCH_HEAD; never expose it from
+        # read-only preview mode or without durable owner-local worker setup.
+        if match.group(2) == 'check-windows' and not self.server.browser_pull.configured:
+            self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "OWNER_CHECK_NOT_CONFIGURED"})
             return
         # Origin and session-derived CSRF token both required; neither an
         # external website nor a stolen previewId is enough to trigger Git.
@@ -231,7 +236,15 @@ class Handler(BaseHTTPRequestHandler):
         repo_id, action = match.groups()
         session = self.session_id()
         try:
-            if action == "pull-preview":
+            if action == 'check-windows':
+                if body:
+                    raise PullDenied('OWNER_CHECK_FIELDS_INVALID')
+                data = self.server.mirror.check_repository(repo_id)
+                if len(data.get('repositories', [])) != 1 or data['repositories'][0].get('repoId') != repo_id:
+                    raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
+                result = {"schemaVersion": 1, "checkedAt": data['checkedAt'],
+                          "repository": data['repositories'][0]}
+            elif action == "pull-preview":
                 if body:
                     raise PullDenied("PULL_PREVIEW_FIELDS_INVALID")
                 result = self.server.browser_pull.preview(repo_id, session)

@@ -200,6 +200,154 @@ class GitStatusTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+class OwnerCheckFetchTests(unittest.TestCase):
+    """Real offline Git graph, no GitHub calls, no branch/worktree mutation."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='mirror-check-fetch-')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.bare = self.base / 'bare.git'
+        self.publisher = self.base / 'publisher'
+        self.root = self.base / 'Repos'
+        self.clone = self.root / 'sample'
+        self.root.mkdir()
+        self.cmd('git','init','--bare','-q',str(self.bare))
+        self.cmd('git','init','-q',str(self.publisher))
+        self.git(self.publisher, 'checkout','-qb','main')
+        self.git(self.publisher, 'config','user.name','Fixture')
+        self.git(self.publisher, 'config','user.email','fixture@example.invalid')
+        (self.publisher / 'notes.txt').write_text('old\n')
+        self.git(self.publisher,'add','notes.txt')
+        self.git(self.publisher,'commit','-qm','initial')
+        self.old = self.git(self.publisher,'rev-parse','HEAD')
+        self.git(self.publisher,'remote','add','origin',str(self.bare))
+        self.git(self.publisher,'push','-q','origin','main')
+        self.cmd('git','clone','-q','-b','main',str(self.bare),str(self.clone))
+        (self.publisher / 'notes.txt').write_text('old\nnew\n')
+        self.git(self.publisher,'add','notes.txt')
+        self.git(self.publisher,'commit','-qm','new')
+        self.new = self.git(self.publisher,'rev-parse','HEAD')
+        self.git(self.publisher,'push','-q','origin','main')
+        self.assertNotEqual(self.old,self.new)
+        self.base_primary = {'kind':'primary', 'branch':'main','head':self.new,
+                             'origin':str(self.bare),'status':'registered',
+                             'clean':True, 'targetEligible':True}
+        self.gateway = {'source':'fortis-gateway','head':self.new,
+                        'branches':{'main':self.new},'pullRequests':None,
+                        'workflowRuns':None,'checkRuns':{},'readErrors':{},
+                        'truncated':{},'requiredCI':'NOT_VERIFIED','error':None}
+        self.mirror = Mirror(self.root)
+
+    def cmd(self,*args):
+        return subprocess.check_output(args,stderr=subprocess.DEVNULL,timeout=20).decode().strip()
+
+    def git(self,repo,*args):
+        return self.cmd('git','-C',str(repo),*args)
+
+    def scoped(self,target=None):
+        return (mock.patch('mirror_api.operations.docker_inventory',return_value={
+                    'sample':[dict(self.base_primary)]}),
+                mock.patch('mirror_api.operations.github_main',return_value={
+                    **self.gateway,'head':target or self.new,
+                    'branches':{'main':target or self.new}}))
+
+    def offline_fetch_runner(self, *args, **kwargs):
+        argv = list(args[0])
+        if 'fetch' in argv and 'protocol.file.allow=never' in argv:
+            self.fetches.append(argv)
+            # Production forbids file URLs; this isolated test exercises the
+            # actual Git graph using a local bare fixture instead of GitHub.
+            argv[argv.index('protocol.file.allow=never')] = 'protocol.file.allow=always'
+        return self.real_run(argv, **kwargs)
+
+    def test_owner_check_fetches_missing_target_and_proves_behind(self):
+        self.fetches=[]
+        self.real_run=subprocess.run
+        self.assertNotEqual(self.git(self.clone,'rev-parse','HEAD'),self.new)
+        self.assertEqual('old\n',(self.clone/'notes.txt').read_text())
+        self.assertNotEqual(0,subprocess.run(['git','-C',str(self.clone),'cat-file','-e',
+                              self.new+'^{commit}'],stderr=subprocess.DEVNULL).returncode)
+        inv, gateway = self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+            read_only=self.mirror.inventory(remote=True,repo='sample')['repositories'][0]
+            self.assertEqual('unknown',read_only['windows']['relation'])
+            self.assertFalse(self.fetches,'Read-only inventory must not fetch')
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual(1,len(self.fetches))
+        self.assertEqual('main',self.fetches[0][-1])
+        self.assertEqual('origin',self.fetches[0][-2])
+        self.assertEqual('behind',checked['windows']['relation'])
+        self.assertEqual('VERIFIED',checked['windows']['fetchStatus'])
+        self.assertIsNone(checked['windows']['fetchError'])
+        self.assertTrue(checked['actions']['pull_main_browser']['fastForwardVerified'])
+        self.assertTrue(checked['actions']['pull_main_browser']['available'])
+        self.assertEqual(self.old,self.git(self.clone,'rev-parse','HEAD'))
+        self.assertEqual('main',self.git(self.clone,'branch','--show-current'))
+        self.assertEqual('old\n',(self.clone/'notes.txt').read_text())
+        self.assertEqual('',self.git(self.clone,'status','--porcelain=v1'))
+        self.assertEqual(self.new,self.git(self.clone,'rev-parse','FETCH_HEAD'))
+        self.assertIsInstance(checked['readTimingsMs']['windowsFetch'],int)
+
+    def test_changed_remote_target_does_not_fake_verified_history(self):
+        self.fetches=[];self.real_run=subprocess.run
+        unrelated='f'*40
+        self.base_primary['head']=unrelated
+        inv,gateway=self.scoped(target=unrelated)
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual(1,len(self.fetches))
+        self.assertEqual('FAILED',checked['windows']['fetchStatus'])
+        self.assertEqual('WINDOWS_FETCHED_MAIN_CHANGED',checked['windows']['fetchError'])
+        self.assertEqual('unknown',checked['windows']['relation'])
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+        self.assertEqual(self.old,self.git(self.clone,'rev-parse','HEAD'))
+
+    def test_dirty_or_untrusted_clone_never_fetches(self):
+        self.fetches=[];self.real_run=subprocess.run
+        (self.clone/'notes.txt').write_text('local dirty change\n')
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual([],self.fetches)
+        self.assertEqual('SKIPPED',checked['windows']['fetchStatus'])
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+        self.assertEqual('local dirty change\n',(self.clone/'notes.txt').read_text())
+        self.git(self.clone,'checkout','--','notes.txt')
+        self.git(self.clone,'remote','set-url','origin','https://example.invalid/foreign.git')
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual([],self.fetches)
+        self.assertFalse(checked['windows']['originValid'])
+        self.assertEqual('SKIPPED',checked['windows']['fetchStatus'])
+
+    def test_fetch_failure_and_timeout_not_reported_as_behind(self):
+        self.fetches=[];self.real_run=subprocess.run
+        def failed(argv,**kwargs):
+            if 'fetch' in argv:
+                self.fetches.append(argv)
+                return subprocess.CompletedProcess(argv,128,b'',b'FAIL')
+            return self.real_run(argv,**kwargs)
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=failed):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual('WINDOWS_FETCH_FAILED',checked['windows']['fetchError'])
+        self.assertEqual('unknown',checked['windows']['relation'])
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+        self.assertEqual(1,len(self.fetches))
+        def timed_out(argv,**kwargs):
+            if 'fetch' in argv:
+                raise subprocess.TimeoutExpired(argv,45)
+            return self.real_run(argv,**kwargs)
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=timed_out):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual('WINDOWS_FETCH_TIMEOUT',checked['windows']['fetchError'])
+        self.assertEqual('unknown',checked['windows']['relation'])
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+
+
 class GitWindowsConfigRegressionTests(unittest.TestCase):
     """Mirror reads must interpret CRLF exactly like ordinary Git for Windows."""
 

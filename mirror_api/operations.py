@@ -1,4 +1,4 @@
-"""Mirror observation backend. Reads never checkout, fetch or modify Git worktrees."""
+"""Mirror observations; owner-authorized checks may fetch Git metadata only."""
 import json
 import os
 from pathlib import Path
@@ -268,11 +268,63 @@ def relation_to_sha(path, source, target):
     return "diverged"
 
 
+def fetch_windows_main_history(windows_root, repo_id, expected_origin, expected_head, target_sha):
+    """Owner-authorized metadata fetch only, never checkout/merge/reset.
+
+    The caller has already verified fresh GitHub main from the typed Gateway.
+    Re-validate the Windows checkout before AND after Git network activity,
+    and pin FETCH_HEAD to the same Gateway SHA. Do not infer a direction on
+    transport error, remote change or any unexpected local-state change.
+    """
+    if (not REPO.fullmatch(repo_id) or type(expected_origin) is not str or
+            type(expected_head) is not str or not SHA.fullmatch(expected_head) or
+            type(target_sha) is not str or not SHA.fullmatch(target_sha)):
+        return 'FETCH_INPUT_INVALID'
+    before = windows_status(windows_root, repo_id, expected_origin)
+    if (before['error'] or before['branch'] != 'main' or
+            before['head'] != expected_head or before['clean'] is not True or
+            before['originValid'] is not True):
+        return 'WINDOWS_CHANGED_BEFORE_FETCH'
+    root = windows_root / repo_id
+    argv = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+            '-c', 'protocol.file.allow=never', '-C', str(root), 'fetch',
+            '--no-tags', '--no-recurse-submodules', 'origin', 'main']
+    # Unlike observational Git calls, fetch MUST be allowed to write its own
+    # metadata/locks. No shell, stdin, interactive credential prompts or
+    # dynamic Git refspec. It may contact ONLY the verified origin/main.
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never')
+    env.pop('GIT_OPTIONAL_LOCKS', None)
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45,
+            env=env, check=False)
+    except subprocess.TimeoutExpired:
+        return 'WINDOWS_FETCH_TIMEOUT'
+    except OSError:
+        return 'WINDOWS_FETCH_UNAVAILABLE'
+    if result.returncode:
+        return 'WINDOWS_FETCH_FAILED'
+    try:
+        fetched = git(root, 'rev-parse', '--verify', 'FETCH_HEAD').lower()
+    except ObservationError:
+        return 'WINDOWS_FETCH_HEAD_UNVERIFIED'
+    if fetched != target_sha:
+        return 'WINDOWS_FETCHED_MAIN_CHANGED'
+    after = windows_status(windows_root, repo_id, expected_origin)
+    if (after['error'] or after['branch'] != 'main' or
+            after['head'] != expected_head or after['clean'] is not True or
+            after['originValid'] is not True):
+        return 'WINDOWS_CHANGED_AFTER_FETCH'
+    return None
+
+
 def evaluate_actions(windows, github, *, docker_primary=None, approved_sha=None):
     """Availability, not authorization: gateway policy is a separate gate."""
     reasons = []
     if windows.get("error"):
         reasons.append(windows["error"])
+    if windows.get('fetchError'):
+        reasons.append(windows['fetchError'])
     if not windows.get("originValid"):
         reasons.append("WINDOWS_ORIGIN_MISMATCH")
     if windows.get("branch") != "main":
@@ -298,6 +350,8 @@ def evaluate_actions(windows, github, *, docker_primary=None, approved_sha=None)
         local.append("DOCKER_MAIN_NOT_AT_GITHUB_MAIN")
     if windows.get("error") or not windows.get("originValid"):
         local.append("WINDOWS_ORIGIN_NOT_VERIFIED")
+    if windows.get('fetchError'):
+        local.append(windows['fetchError'])
     if windows.get("branch") != "main":
         local.append("WINDOWS_NOT_ON_MAIN")
     if windows.get("clean") is not True:
@@ -322,7 +376,15 @@ class Mirror:
     def __init__(self, windows_root):
         self.windows_root = Path(windows_root).expanduser().resolve()
 
-    def inventory(self, remote=False, repo=None, *, details=False):
+    def check_repository(self, repo_id):
+        """Explicit owner-authenticated POST; may write Windows Git metadata."""
+        if type(repo_id) is not str or not REPO.fullmatch(repo_id):
+            raise ObservationError('REPOSITORY_ID_INVALID')
+        return self.inventory(remote=True, repo=repo_id, fetch_windows=True)
+
+    def inventory(self, remote=False, repo=None, *, details=False, fetch_windows=False):
+        if fetch_windows and (not remote or repo is None or details):
+            raise ObservationError('OWNER_CHECK_SCOPE_REQUIRED')
         started = time.perf_counter()
         rows = docker_inventory(repo)
         docker_ms = round((time.perf_counter() - started) * 1000)
@@ -353,8 +415,31 @@ class Mirror:
                 "workflowRuns": None, "checkRuns": {}, "readErrors": {"gateway":"NOT_CHECKED"},
                 "truncated": {}, "requiredCI": "NOT_CHECKED", "error": "NOT_CHECKED"}
             gateway_ms = round((time.perf_counter() - remote_start) * 1000) if remote else None
+            windows_fetch_ms = None
+            if fetch_windows:
+                windows['fetchStatus'] = 'SKIPPED'
+                windows['fetchError'] = None
+                # Only clean, exact-origin, registered Windows main may fetch.
+                # Guard against missing/mismatched Gateway SHA; no network
+                # when both Windows and GitHub already point at the same HEAD.
+                if (github.get('error') is None and type(github.get('head')) is str and
+                        SHA.fullmatch(github['head']) and primary.get('head') == github['head'] and
+                        primary.get('clean') is True and primary.get('branch') == 'main' and
+                        primary.get('targetEligible') is True and
+                        windows.get('error') is None and windows.get('originValid') is True and
+                        windows.get('branch') == 'main' and windows.get('clean') is True):
+                    if windows['head'] == github['head']:
+                        windows['fetchStatus'] = 'NOT_NEEDED'
+                    else:
+                        fetched_at = time.perf_counter()
+                        windows['fetchError'] = fetch_windows_main_history(
+                            self.windows_root, name, origin, windows['head'], github['head'])
+                        windows_fetch_ms = round((time.perf_counter() - fetched_at) * 1000)
+                        windows['fetchStatus'] = ('VERIFIED' if windows['fetchError'] is None
+                                                  else 'FAILED')
             relation_start = time.perf_counter()
-            if github.get("head") and windows["exists"] and windows["error"] is None:
+            if (github.get("head") and windows["exists"] and windows["error"] is None and
+                    not windows.get('fetchError')):
                 windows["relation"] = relation_to_sha(self.windows_root / name,
                                                         windows["head"], github["head"])
             relation_ms = round((time.perf_counter() - relation_start) * 1000)
@@ -369,5 +454,6 @@ class Mirror:
             output["repositories"].append({"repoId": name, "docker": {"primary": primary,
                 "worktrees": worktrees}, "windows": windows, "github": github, "actions": actions,
                 "readTimingsMs": {"dockerInventory": docker_ms, "windowsGit": windows_ms,
-                                  "githubGateway": gateway_ms, "gitAncestry": relation_ms}})
+                                  "githubGateway": gateway_ms, "windowsFetch": windows_fetch_ms,
+                                  "gitAncestry": relation_ms}})
         return output

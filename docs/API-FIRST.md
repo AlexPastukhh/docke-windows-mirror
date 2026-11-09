@@ -4,11 +4,11 @@ This document owns the new service/frontend source usage and its current limits.
 
 ## Components and available actions
 
-- `mirror_api.operations` reads Docker's **Git-registered** linked worktrees, Windows primary clones, and optional exact GitHub heads without a hidden Git fetch. Noncanonical worktrees remain visible, but are not eligible for native Gateway worktree mutations. An unknown status is never reported as clean/current.
-- `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. Normal GETs are observational; the **only** owner-local browser mutation is a POST Preview → one-use Execute Windows `main` Pull, protected by exact Host/Origin, session-derived CSRF and a fresh SHA-bound one-click confirmation. Other browser writes are denied. No browser session grants access to the separate Gateway listener.
+- `mirror_api.operations` reads Docker's **Git-registered** linked worktrees, Windows primary clones, and exact GitHub heads. Ordinary GETs never fetch; the separately authorized owner check POST may fetch Windows Git metadata (`origin main`) to prove ancestry without changing Windows HEAD, index or worktree. Noncanonical worktrees remain visible, but are not eligible for native Gateway worktree mutations. An unknown status is never reported as clean/current.
+- `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. Normal GETs are observational. Owner-local POSTs are: **`/api/v1/repositories/<repo>/check-windows`** for bounded Git metadata fetch only and Preview → one-use Execute for guarded Windows `main` Pull. Both require exact Host, Origin, session-derived CSRF and the normal (non-preview) runtime; only the Pull Execute may move HEAD/worktree. Other browser writes are denied. No browser session grants access to the separate Gateway listener.
 - `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only PR metadata and Actions/Checks observations come from the **existing authenticated GitHub Gateway typed client**, invoked from the Docker Repo worker by `tools/Export-Mirror-GitHub-Read.py`. Per-repo branch SHAs also come from typed Gateway `list_branches`, never local `git ls-remote` or a Windows Git credential. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
   the GitHub UI's required checks/reviews; the owner verifies those before manual Merge. Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
-- Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows Pull is separate from GitHub network publication and may perform guarded Git fetch only in the Windows receiver.
+- Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows check and Pull are separate from GitHub publication; both may perform constrained Windows `git fetch origin main` under the owner's Git credentials, but **only Pull** can run `merge --ff-only`.
 - `mirror_api.pull`: shared Windows `main`-only fast-forward worker with exact SHA, clean Docker `main` == verified GitHub `main`, matching trusted Docker/Windows origin, repeated Windows/GitHub preflight, fixed `git fetch` and pinned `merge --ff-only`, readback and durable SQLite receipt. `mirror_api.browser_pull` authorizes a one-shot owner-local browser invocation; an additional authenticated HTTPS Gateway listener is separately configurable and disabled by default. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
 - **Mirror-provider не является действующим Gateway provider:** его исходники
   (`fortis_approvals/integrations/mirror/`) находятся как **untracked** файлы
@@ -48,7 +48,9 @@ The browser now preserves the **old WinForms presentation hierarchy**:
    primary branch rather than offering a task-branch selector: task branches
    are exclusively in the opt-in Worktrees tab. Ahead/behind are only shown
    where the backend confirms Git ancestry; mismatching SHAs otherwise remain
-   `НАПРАВЛЕНИЕ НЕИЗВЕСТНО`.
+   `НАПРАВЛЕНИЕ НЕИЗВЕСТНО`. The owner check POST may fetch missing Windows
+   history to classify behind/ahead/diverged before offering a Pull; regular
+   GET and the PR/CI-details GET remain read-only.
 5. **Pull Windows is now an owner-local action**: the selected Docker primary
    and Windows `main` must both be clean, Docker `main` must match fresh GitHub
    `main`, and the Windows origin must match. Clicking **Pull Windows** once
@@ -165,9 +167,20 @@ header guidance lines are removed.
 ## Fast primary inspection and explicitly detailed worktree PR/CI
 
 The owner **«Проверить выбранный»** and **«Проверить все»** call the same
-read-only `?remote=true` repository endpoint for one or up to four repositories
-concurrently. For each repo, Docker inventory, Windows Git and a **fresh
-Gateway-verified GitHub `main` branch SHA** are checked. The Gateway reader
+CSRF-protected `POST /api/v1/repositories/<repo>/check-windows` for one or
+up to four repositories concurrently. For each repo, Docker inventory, Windows
+Git and a **fresh Gateway-verified GitHub `main` branch SHA** are checked.
+If Windows clean `main` differs from that SHA and the registered Docker primary
+is clean and matches GitHub, the owner check performs bounded `git fetch
+--no-tags --no-recurse-submodules origin main` in the Windows clone (45 s
+limit, no interactive credentials), proves `FETCH_HEAD` equals the exact
+Gateway SHA, rechecks Windows branch/HEAD/origin/clean, and reads `merge-base`.
+The check can update Git objects/FETCH_HEAD and possibly remote tracking refs,
+**not** Windows HEAD/index/worktree. `fetch` error, timeout, moving remote or
+changed Windows status stays unknown, displays an explicit error and blocks
+Pull until fresh verification. A match needs no fetch; unsafe clones never fetch.
+Normal `GET /api/v1/repositories/<repo>?remote=true` remains read-only for
+callers and Pull post-result refresh. Developer-preview mode denies this POST. The Gateway reader
 calls only typed `list_branches`; it does not fetch closed PR details, PR lists,
 workflow history or check runs. All local SHA, origin, clean, branch and
 ancestry checks, and owner-local Pull fresh Preview, are unchanged. In this
@@ -189,7 +202,10 @@ is explicitly denied; no PR or CI statuses are upgraded without evidence.
 
 The selected-row detail block reports Docker inventory, Windows Git, Gateway
 and ancestry read timings in milliseconds, plus the Gateway reader's per-stage
-durations. The check progress banner reports total elapsed time. These are
+durations. The check progress banner reports total elapsed time, while the selected row
+also exposes Windows fetch status/error and measured fetch time. Cancelling
+stops scheduling new checks, but cannot promise to abort an already running
+server-side Git fetch. These are
 observations, not guarantees of Windows wall-clock timing or GitHub latencies.
 A local Docker exporter scan of 31 repos / 118 worktrees took ~2.8 s in the
 2026-11-09 test environment; Windows Git and actual browser layout must be
@@ -199,7 +215,9 @@ verified on the owner's Windows session.
 `docke-windows-mirror` full PR/CI inspection took 28.7 seconds including ten
 sequential closed PR detail reads. After the change, fresh `main`-only reads
 took ~2.0 s per tested repository. Four independent main-only reads completed
-in ~2.2 s with four concurrent Gateway requests. A detailed Worktrees PR/CI
+in ~2.2 s with four concurrent Gateway requests **before Windows fetch was
+added**; that Gateway-only baseline is not the latency of the new owner check.
+A detailed Worktrees PR/CI
 read is intentionally slower, opt-in, and can return partial/unknown evidence
 if Gateway checks fail. No Git effects are ever performed by these reads.
 

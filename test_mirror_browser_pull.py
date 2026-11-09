@@ -42,10 +42,16 @@ class FakeMirror:
     def __init__(self):
         self.data = observed()
         self.calls = []
+        self.checks = []
+
+    def check_repository(self, repo):
+        self.checks.append(repo)
+        return {'schemaVersion':1, 'checkedAt':'2026-11-09T12:00:00Z',
+                'repositories':copy.deepcopy(self.data['repositories'])}
 
     def inventory(self, remote=False, repo=None):
         self.calls.append((remote, repo))
-        return copy.deepcopy(self.data)
+        return {**copy.deepcopy(self.data), 'checkedAt':'2026-11-09T12:00:00Z'}
 
 
 class BrowserPullUnitTests(unittest.TestCase):
@@ -215,6 +221,42 @@ class BrowserPullHttpTests(unittest.TestCase):
         self.assertFalse(body['readOnly'])
         self.assertEqual('local_owner_confirm', body['browserPull']['mode'])
         self.assertTrue(body['browserPull']['configured'])
+
+    def test_owner_check_fetch_route_is_post_csrf_protected_and_only_selected(self):
+        # The formerly read-only GET cannot silently fetch; explicit POST does.
+        self.login()
+        for label, headers in [('origin', {'Origin':'https://attacker.invalid'}),
+                               ('csrf', {'X-CSRF-Token':''}),
+                               ('site', {'Sec-Fetch-Site':'cross-site'})]:
+            with self.subTest(label=label):
+                self.assertEqual(403,self.post('check-windows',headers=headers)[0])
+        self.assertEqual([],self.mirror.checks)
+        self.assertEqual(409,self.post('check-windows','{"unexpected":true}')[0])
+        self.assertEqual([],self.mirror.checks)
+        self.assertEqual(405,self.request('POST','/api/v1/repositories/sample/check-windows?remote=true',
+                                        body='{}',headers={'Cookie':self.cookie})[0])
+        code,result,_=self.post('check-windows')
+        self.assertEqual(200,code)
+        self.assertEqual('sample',result['repository']['repoId'])
+        self.assertEqual(['sample'],self.mirror.checks)
+        self.assertEqual([],self.mirror.calls,'Owner check does not invoke Pull Preview or Execute')
+        # Read-only GET still uses only observation inventory.
+        code,_,_=self.request('GET','/api/v1/repositories/sample?remote=true',
+                              headers={'Cookie':self.cookie})
+        self.assertEqual(200,code)
+        self.assertEqual(['sample'],self.mirror.checks)
+        self.assertEqual([(True,'sample')],self.mirror.calls)
+
+    def test_owner_check_is_forbidden_in_read_only_preview_and_without_worker(self):
+        self.login()
+        self.server.allow_browser_pull=False
+        self.assertEqual(405,self.post('check-windows')[0])
+        self.assertEqual([],self.mirror.checks)
+        self.server.allow_browser_pull=True
+        with mock.patch.object(BrowserPull, 'configured', new_callable=mock.PropertyMock,
+                               return_value=False):
+            self.assertEqual(405,self.post('check-windows')[0])
+        self.assertEqual([],self.mirror.checks)
 
     def test_invalid_json_routes_and_failed_session_reuse(self):
         self.login()
