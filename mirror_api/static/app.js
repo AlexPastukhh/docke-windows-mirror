@@ -12,6 +12,14 @@ const MAIN_COLUMNS = [
 ];
 let rows = [], active = null, detailTab = 'row', checkController = null;
 let pullBusy = false, browserPullEnabled = false;
+let lastPullReceipt = null;
+const LAYOUT_KEY = 'fortis.mirror.columns.v1';
+const PENDING_PULL_KEY = 'fortis.mirror.pendingPull.v1';
+// Retain generous widths for the requested key columns; keep others compact.
+const DEFAULT_WIDTHS = [205, 105, 106, 130, 101, 113, 105, 106, 130, 155, 113, 186, 226];
+const MIN_WIDTH = 68, MAX_WIDTH = 640;
+let layout = {docker: true, windows: true, widths: [...DEFAULT_WIDTHS]};
+const resizeHandles = [];
 const selectedWorktrees = new Map();
 const $ = id => document.getElementById(id);
 const el = (tag, value, cls) => {
@@ -23,10 +31,146 @@ const el = (tag, value, cls) => {
 const known = value => value !== null && value !== undefined && value !== '';
 const show = value => known(value) ? String(value) : '—';
 const short = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 8) : '—';
-const ghChecked = row => Boolean(row.github && row.github.head && !row.github.error);
+const ghChecked = row => Boolean(!row.remoteCheckError && row.github && row.github.head && !row.github.error);
 const primary = row => row.docker && row.docker.primary || null;
 const changedLabel = count => count === null || count === undefined ? 'НЕ ПРОВЕРЕНО' :
   count === 0 ? 'Нет' : 'Есть: ' + count;
+const isSha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+const isRequestId = value => typeof value === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+const isRepoId = value => typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}$/.test(value);
+function boundedWidth(value, index) {
+  const minimum = index === 0 ? 150 : MIN_WIDTH;
+  return Number.isSafeInteger(value) && value >= minimum && value <= MAX_WIDTH ? value : DEFAULT_WIDTHS[index];
+}
+function readLayout() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_KEY));
+    if (raw && typeof raw.docker === 'boolean' && typeof raw.windows === 'boolean' &&
+        Array.isArray(raw.widths) && raw.widths.length === MAIN_COLUMNS.length) {
+      return {docker: raw.docker, windows: raw.windows,
+        widths: raw.widths.map((width, index) => boundedWidth(width, index))};
+    }
+  } catch (ignored) { /* No storage permissions: keep in-memory layout. */ }
+  return {docker: true, windows: true, widths: [...DEFAULT_WIDTHS]};
+}
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); }
+  catch (ignored) { /* Reading and resizing must work without storage. */ }
+}
+function columnVisible(index) {
+  if (index === 0) return true;
+  if (index <= 5) return layout.docker;
+  if (index <= 10) return layout.windows;
+  return layout.docker || layout.windows;
+}
+function applyLayout() {
+  let total = 0;
+  const headers = $('main-headers').children;
+  const columns = $('main-cols').children;
+  MAIN_COLUMNS.forEach((header, index) => {
+    const visible = columnVisible(index), width = layout.widths[index];
+    if (visible) total += width;
+    headers[index].hidden = !visible;
+    headers[index].style.width = width + 'px';
+    columns[index].hidden = !visible;
+    columns[index].style.width = width + 'px';
+    const handle = resizeHandles[index];
+    if (handle) handle.setAttribute('aria-valuenow', String(width));
+  });
+  $('main-table').style.width = total + 'px';
+  for (const tr of $('primary-rows').children) {
+    if (tr.children.length === 1) {
+      tr.children[0].colSpan = MAIN_COLUMNS.filter((_, index) => columnVisible(index)).length;
+    } else {
+      for (let index = 0; index < MAIN_COLUMNS.length; index++)
+        tr.children[index].hidden = !columnVisible(index);
+    }
+  }
+  for (const group of ['docker', 'windows']) {
+    const button = $('toggle-' + group);
+    button.setAttribute('aria-pressed', String(layout[group]));
+    button.textContent = (group === 'docker' ? 'Docker' : 'Windows') +
+      (layout[group] ? ': скрыть' : ': показать');
+  }
+}
+function setColumnWidth(index, value) {
+  const minimum = index === 0 ? 150 : MIN_WIDTH;
+  layout.widths[index] = Math.max(minimum, Math.min(MAX_WIDTH, Math.round(value)));
+  applyLayout();
+  saveLayout();
+}
+function setupColumns() {
+  layout = readLayout();
+  const headers = $('main-headers').children;
+  if (headers.length !== MAIN_COLUMNS.length) throw new Error('TABLE_HEADER_MISMATCH');
+  for (let index = 0; index < MAIN_COLUMNS.length; index++) {
+    const column = el('col');
+    $('main-cols').append(column);
+    const grip = el('span', undefined, 'column-resizer');
+    grip.tabIndex = 0;
+    grip.setAttribute('role', 'separator');
+    grip.setAttribute('aria-orientation', 'vertical');
+    grip.setAttribute('aria-valuemin', String(index === 0 ? 150 : MIN_WIDTH));
+    grip.setAttribute('aria-valuemax', String(MAX_WIDTH));
+    grip.setAttribute('aria-label', 'Ширина столбца: ' + MAIN_COLUMNS[index]);
+    grip.title = 'Перетащить — изменить ширину; двойной щелчок — сбросить';
+    grip.onkeydown = event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setColumnWidth(index, layout.widths[index] + (event.key === 'ArrowRight' ? 12 : -12));
+    };
+    grip.ondblclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      setColumnWidth(index, DEFAULT_WIDTHS[index]);
+    };
+    grip.onpointerdown = event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const start = event.clientX, width = layout.widths[index];
+      const move = next => setColumnWidth(index, width + next.clientX - start);
+      const stop = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', stop);
+        window.removeEventListener('pointercancel', stop);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('pointercancel', stop);
+    };
+    headers[index].title = MAIN_COLUMNS[index];
+    headers[index].append(grip);
+    resizeHandles.push(grip);
+  }
+  applyLayout();
+}
+function restorePendingPull() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(PENDING_PULL_KEY));
+    if (saved && isRepoId(saved.repo) && isRequestId(saved.requestId) && isSha(saved.targetSha))
+      lastPullReceipt = saved;
+  } catch (ignored) { /* New session: no automatic Git effects. */ }
+  $('receipt-controls').hidden = !lastPullReceipt;
+}
+function rememberPendingPull(repo, requestId, targetSha) {
+  lastPullReceipt = {repo, requestId, targetSha};
+  try { sessionStorage.setItem(PENDING_PULL_KEY, JSON.stringify(lastPullReceipt)); }
+  catch (ignored) { /* In-page reconciliation is still possible. */ }
+  $('receipt-controls').hidden = false;
+}
+function clearPendingPull() {
+  lastPullReceipt = null;
+  try { sessionStorage.removeItem(PENDING_PULL_KEY); } catch (ignored) { /* Session ended. */ }
+  $('receipt-controls').hidden = true;
+}
+function pullEligible(row) {
+  return !!(row && row.actions && row.actions.pull_main_browser &&
+    row.actions.pull_main_browser.available === true && !row.remoteCheckError);
+}
+
 
 function dockerGithub(row) {
   const d = primary(row), gh = row.github || {};
@@ -65,6 +209,7 @@ function overall(row) {
   if (w.branch !== 'main') return ['WINDOWS: НЕ MAIN', 'Проверить активную ветку Windows'];
   if (w.clean === false) return ['WINDOWS: ИЗМЕНЕНИЯ', 'Разобрать Windows-файлы; Pull запрещён'];
   if (w.clean !== true) return ['WINDOWS: НЕ ПРОВЕРЕН', 'Проверить git status Windows'];
+  if (row.remoteCheckError) return ['ОШИБКА ПРОВЕРКИ', 'GitHub не проверен: ' + row.remoteCheckError];
   if (!ghChecked(row)) return ['НЕ ПРОВЕРЕНО', 'Нажать «Проверить выбранный/все»'];
   if (w.relation === 'diverged') return ['WINDOWS: ИСТОРИИ РАЗОШЛИСЬ', 'Не выполнять Pull'];
   if (w.relation === 'ahead') return ['WINDOWS ВПЕРЕДИ', 'Проверить неожиданные Windows-коммиты'];
@@ -118,6 +263,9 @@ function rowDetails(row) {
       row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
       ' · окончательное решение принимает только свежий серверный Preview',
+    'Локальная проверка Windows: ' + show(w.checkedAt),
+    'Проверка GitHub: ' + (row.remoteCheckError ? 'ОШИБКА: ' + row.remoteCheckError :
+      ghChecked(row) ? show(row.remoteCheckedAt || gh.checkedAt) : 'НЕ ПРОВЕРЕН'),
     'Gateway read errors: ' + (gh.readErrors && Object.keys(gh.readErrors).length ?
       Object.entries(gh.readErrors).map(([key, value]) => key + '=' + value).join('; ') : 'Нет / не получены'),
     '', 'ИЗМЕНЁННЫЕ ФАЙЛЫ DOCKER PRIMARY (git status)',
@@ -172,30 +320,41 @@ function worktreeDetails(row, tree) {
 function render() {
   const viewport = $('main-scroll'), left = viewport.scrollLeft, top = viewport.scrollTop;
   const tbody = $('primary-rows'); tbody.replaceChildren();
-  for (const row of rows) {
+  const query = $('repo-filter').value.trim().toLocaleLowerCase();
+  const attention = $('only-attention').checked;
+  const visible = rows.filter(row =>
+    (!query || row.repoId.toLocaleLowerCase().includes(query)) &&
+    (!attention || overall(row)[0] !== 'АКТУАЛЕН'));
+  if (!visible.some(row => row.repoId === active)) active = visible.length ? visible[0].repoId : null;
+  for (const row of visible) {
     const tr = el('tr'); tr.tabIndex = 0; tr.dataset.repo = row.repoId;
     if (row.repoId === active) { tr.classList.add('selected'); tr.setAttribute('aria-selected', 'true'); }
     rowFields(row).forEach((field, idx) => {
       const td = el('td', field, idx === 0 ? 'repo-name' : idx === 3 || idx === 8 || idx === 11 ? tone(field) : '');
-      td.title = String(field); tr.append(td);
+      td.title = String(field);
+      td.hidden = !columnVisible(idx);
+      tr.append(td);
     });
     tr.onclick = () => { if (active !== row.repoId) { active = row.repoId; render(); } };
     tr.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); tr.click(); } };
     tbody.append(tr);
   }
-  if (!rows.length) {
-    const tr = el('tr'), td = el('td', 'Репозитории не получены');
-    td.colSpan = MAIN_COLUMNS.length; tr.append(td); tbody.append(tr);
+  if (!visible.length) {
+    const tr = el('tr'), td = el('td', rows.length ? 'По фильтру ничего не найдено' : 'Репозитории не получены');
+    td.colSpan = MAIN_COLUMNS.filter((_, index) => columnVisible(index)).length;
+    tr.append(td); tbody.append(tr);
   }
   viewport.scrollLeft = left; viewport.scrollTop = top;
-  $('count').textContent = rows.length + ' репозиториев';
+  $('count').textContent = visible.length === rows.length ? rows.length + ' репозиториев' :
+    visible.length + ' из ' + rows.length + ' репозиториев';
   const chosen = rows.find(row => row.repoId === active);
   $('selection-title').textContent = chosen ? chosen.repoId : 'Выберите репозиторий';
   $('row-full').textContent = chosen ? rowDetails(chosen) : 'Выберите строку основной таблицы.';
   renderWorktrees(chosen);
   $('copy-details').disabled = !chosen;
   $('selected-remote').disabled = !chosen || !!checkController || pullBusy;
-  $('pull-windows').disabled = !chosen || !!checkController || pullBusy || !browserPullEnabled;
+  $('pull-windows').disabled = !chosen || !!checkController || pullBusy ||
+    !browserPullEnabled || !!lastPullReceipt || !pullEligible(chosen);
 }
 function renderWorktrees(row) {
   const body = $('worktree-rows'); body.replaceChildren();
@@ -248,7 +407,10 @@ function setBusy(busy) {
   $('local').disabled = busy;
   $('remote').disabled = busy;
   $('selected-remote').disabled = busy || !active;
-  $('pull-windows').disabled = busy || !active || !browserPullEnabled;
+  const current = rows.find(row => row.repoId === active);
+  $('pull-windows').disabled = busy || !active || !browserPullEnabled ||
+    !!lastPullReceipt || !pullEligible(current);
+  $('check-pull-result').disabled = busy || !lastPullReceipt;
   $('cancel').disabled = !checkController;
 }
 function replaceRows(items) {
@@ -289,9 +451,21 @@ async function checkRemote(all) {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
         const at = rows.findIndex(row => row.repoId === name);
-        if (at >= 0) { rows[at] = data.repository; render(); }
+        if (at >= 0) {
+          data.repository.remoteCheckedAt = data.checkedAt;
+          data.repository.remoteCheckError = null;
+          rows[at] = data.repository;
+          render();
+        }
       } catch (error) {
-        if (!signal.aborted) errors++;
+        if (!signal.aborted) {
+          errors++;
+          const at = rows.findIndex(row => row.repoId === name);
+          if (at >= 0) {
+            rows[at].remoteCheckError = 'Запрос к Gateway не выполнен';
+            render();
+          }
+        }
       } finally {
         if (!signal.aborted) {
           completed++;
@@ -318,13 +492,70 @@ async function jsonResponse(response) {
   if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
   return data;
 }
+// Read-only reconciliation of the original operation. Never dispatch Git again.
+const READBACK_LABELS = {
+  GIT_READ_FAILED: 'Не удалось прочитать Git', HEAD_MISMATCH: 'SHA ещё не совпал',
+  BRANCH_MISMATCH: 'Не та ветка Windows', WORKTREE_NOT_CLEAN: 'Git видит локальные изменения',
+  ORIGIN_MISMATCH: 'Origin не подтверждён'
+};
+function receiptMessage(receipt) {
+  const issues = Array.isArray(receipt.readbackIssues) ? receipt.readbackIssues : [];
+  const detail = issues.map(key => READBACK_LABELS[key] || key).join('; ');
+  return 'Результат предыдущего Pull пока не подтверждён (' + show(receipt.state) +
+    ', ' + show(receipt.error) + ')' + (detail ? '. Проверка: ' + detail : '') +
+    '. Request ID: ' + show(receipt.requestId) +
+    '. Git не запускается повторно; нажмите «Проверить результат».';
+}
+async function readPullReceipt(repo, requestId) {
+  return jsonResponse(await fetch('/api/v1/repositories/' + encodeURIComponent(repo) +
+    '/pull-results/' + encodeURIComponent(requestId), {cache: 'no-store'}));
+}
+async function refreshRepository(repo) {
+  const result = await jsonResponse(await fetch('/api/v1/repositories/' +
+    encodeURIComponent(repo) + '?remote=true', {cache: 'no-store'}));
+  const at = rows.findIndex(row => row.repoId === repo);
+  if (at >= 0) {
+    result.repository.remoteCheckedAt = result.checkedAt;
+    result.repository.remoteCheckError = null;
+    rows[at] = result.repository;
+    render();
+  }
+}
+async function reconcilePullResult(saved) {
+  const receipt = await readPullReceipt(saved.repo, saved.requestId);
+  if (receipt.state === 'EXECUTED' && receipt.head === saved.targetSha) {
+    clearPendingPull();
+    showPullResult('Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
+      '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.');
+    try { await refreshRepository(saved.repo); }
+    catch (error) {
+      showPullResult('Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
+        '. Обновление таблицы не удалось; нажмите «Проверить выбранный». Request ID: ' + saved.requestId);
+    }
+    return true;
+  }
+  showPullResult(receiptMessage(receipt));
+  return false;
+}
+async function verifyPullResult() {
+  if (!lastPullReceipt || pullBusy || checkController) return;
+  const saved = {...lastPullReceipt};
+  pullBusy = true;
+  setBusy(true);
+  showPullResult('Читаю сохранённый результат Pull ' + saved.requestId + ' без нового Git…');
+  try { await reconcilePullResult(saved); }
+  catch (error) {
+    showPullResult('Результат Pull пока недоступен: ' + error.message +
+      '. Повторите только «Проверить результат» или проверьте Git вручную. Request ID: ' + saved.requestId);
+  } finally { pullBusy = false; setBusy(false); render(); }
+}
 async function pullWindows() {
-  if (!browserPullEnabled || !active || checkController || pullBusy) return;
+  if (!browserPullEnabled || !active || checkController || pullBusy || lastPullReceipt) return;
   const repo = active;
   pullBusy = true;
   setBusy(true);
   showPullResult('Проверка Windows main и GitHub main для ' + repo + '…');
-  let requestId = null, submitted = false;
+  let requestId = null;
   try {
     const csrf = await jsonResponse(await fetch('/api/v1/csrf', {cache: 'no-store'}));
     const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': csrf.csrf};
@@ -338,6 +569,7 @@ async function pullWindows() {
       return;
     }
     requestId = preview.requestId;
+    rememberPendingPull(repo, requestId, preview.targetSha);
     // The owner's click on Pull Windows is the confirmation. Do not show a
     // second browser modal. Preserve the one-use server-side Preview → Execute
     // protocol and its fresh SHA/origin/clean/fast-forward preconditions.
@@ -345,45 +577,36 @@ async function pullWindows() {
       ' → GitHub ' + preview.targetSha + '. Начинаю guarded fast-forward…');
     showPullResult('Выполняется проверенный fetch + fast-forward для ' + repo +
       ' до ' + preview.targetSha + '. Не повторяйте Pull до результата.');
-    submitted = true;
     const receipt = await jsonResponse(await fetch(prefix + '/pull-execute', {
       method: 'POST', headers,
       body: JSON.stringify({previewId: preview.previewId, confirm: 'PULL_WINDOWS_MAIN'}),
       cache: 'no-store'
     }));
     if (receipt.state === 'EXECUTED' && receipt.head === preview.targetSha) {
-      showPullResult('Windows Pull выполнен: ' + repo + ' → ' + receipt.head +
-        '. Request ID: ' + requestId + '. Проверяю итоговое состояние…');
-      try {
-        const refreshed = await jsonResponse(await fetch(prefix + '?remote=true', {cache: 'no-store'}));
-        const at = rows.findIndex(row => row.repoId === repo);
-        if (at >= 0) { rows[at] = refreshed.repository; render(); }
-        showPullResult('Windows main обновлён: ' + repo + ' → ' + receipt.head +
-          '. Итоговое состояние проверено. Request ID: ' + requestId);
-      } catch (error) {
-        showPullResult('Windows main обновлён: ' + repo + ' → ' + receipt.head +
-          '. Повторное чтение состояния не удалось: ' + error.message +
-          '. Обновите список вручную. Request ID: ' + requestId);
-      }
+      await reconcilePullResult({repo, requestId, targetSha: preview.targetSha});
     } else {
-      showPullResult('Windows Pull не подтверждён. Состояние: ' + receipt.state +
-        ', ошибка: ' + (receipt.error || 'нет подтверждённого результата') +
-        '. Request ID: ' + requestId +
-        '. НЕ повторяйте команду; сначала проверьте Windows main и receipt.');
+      showPullResult(receiptMessage(receipt));
+      // One immediate read-only reconciliation avoids the manual F12 workflow.
+      // A still-uncertain result retains a visible button for the owner.
+      try { await reconcilePullResult({repo, requestId, targetSha: preview.targetSha}); }
+      catch (error) {
+        showPullResult(receiptMessage(receipt) + ' Проверка receipt недоступна: ' + error.message);
+      }
     }
   } catch (error) {
     let observed = '';
-    if (submitted && requestId) {
+    if (requestId && lastPullReceipt) {
       try {
-        const receipt = await jsonResponse(await fetch('/api/v1/repositories/' +
-          encodeURIComponent(repo) + '/pull-results/' + encodeURIComponent(requestId),
-          {cache: 'no-store'}));
-        observed = '. Проверка receipt: ' + receipt.state +
-          (receipt.head ? ' / ' + receipt.head : '') + (receipt.error ? ' / ' + receipt.error : '');
-      } catch (ignored) { observed = '. Receipt недоступен'; }
+        const result = await readPullReceipt(repo, requestId);
+        if (result.state === 'EXECUTED' && result.head === lastPullReceipt.targetSha) {
+          await reconcilePullResult(lastPullReceipt);
+          return;
+        }
+        observed = '. ' + receiptMessage(result);
+      } catch (ignored) { observed = '. Receipt пока недоступен'; }
     }
     showPullResult('Pull Windows для ' + repo + ': ' + error.message + observed +
-      (submitted ? '. НЕ повторяйте автоматически; проверьте фактический SHA и receipt. Request ID: ' + requestId :
+      (requestId ? '. Нажмите «Проверить результат»; повторный Pull не запускайте. Request ID: ' + requestId :
         '. Git не запускался через этот запрос.'));
   } finally {
     pullBusy = false;
@@ -394,6 +617,12 @@ async function pullWindows() {
 $('tab-row').onclick = () => activateTab('row');
 $('tab-worktrees').onclick = () => activateTab('worktrees');
 $('copy-details').onclick = copyDetails;
+$('toggle-docker').onclick = () => {layout.docker = !layout.docker; applyLayout(); saveLayout();};
+$('toggle-windows').onclick = () => {layout.windows = !layout.windows; applyLayout(); saveLayout();};
+$('reset-columns').onclick = () => {layout.widths = [...DEFAULT_WIDTHS]; applyLayout(); saveLayout();};
+$('repo-filter').oninput = render;
+$('only-attention').onchange = render;
+$('check-pull-result').onclick = verifyPullResult;
 $('local').onclick = loadLocal;
 $('remote').onclick = () => checkRemote(true);
 $('selected-remote').onclick = () => checkRemote(false);
@@ -404,6 +633,11 @@ async function initialize() {
   $('selected-remote').disabled = true;
   $('pull-windows').disabled = true;
   activateTab('row');
+  setupColumns();
+  restorePendingPull();
+  if (lastPullReceipt) showPullResult('Есть неподтверждённый результат Pull для ' +
+    lastPullReceipt.repo + ' · Request ID: ' + lastPullReceipt.requestId +
+    '. Используйте «Проверить результат», не запускайте новый Pull.');
   try {
     const response = await fetch('/api/v1/capabilities', {cache: 'no-store'});
     const caps = await response.json();

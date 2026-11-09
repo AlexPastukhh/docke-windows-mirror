@@ -18,6 +18,7 @@ class Element {
   constructor(tag = 'div') {
     this.tagName = tag; this.children = []; this.textContent = ''; this.title = '';
     this.dataset = {}; this.attributes = {}; this.disabled = false; this.hidden = false;
+    this.style = {}; this.value = ''; this.checked = false; this.tabIndex = -1;
     this.scrollLeft = 0; this.scrollTop = 0; this.classSet = new Set();
     this.classList = {add: value => this.classSet.add(value),
       toggle: (value, on) => { if (on) this.classSet.add(value); else this.classSet.delete(value); },
@@ -30,6 +31,17 @@ class Element {
   setAttribute(key, value) { this.attributes[key] = value; }
 }
 const elements = Object.fromEntries(IDs.map(key => [key, new Element()]));
+// DOM fixture must contain the 13 actual header cells from index.html.
+elements['main-headers'].children = Array.from({length: 13}, () => new Element('th'));
+const browserStorage = new Map();
+const makeStorage = () => ({
+  getItem: key => browserStorage.has(key) ? browserStorage.get(key) : null,
+  setItem: (key, value) => browserStorage.set(key, String(value)),
+  removeItem: key => browserStorage.delete(key)
+});
+const localStorage = makeStorage();
+const sessionStorage = makeStorage();
+const winEvents = new Map();
 const sha = digit => digit.repeat(40);
 const fixture = (name, head, task, opts = {}) => ({
   repoId: name,
@@ -49,12 +61,13 @@ const fixture = (name, head, task, opts = {}) => ({
     origin: `https://github.com/AlexPastukhh/${name}.git`, error: null},
   github: {head: opts.checked ? head : null, branches: opts.checked ? {main: head} : {},
     error: opts.checked ? null : 'NOT_CHECKED', requiredCI: 'NOT_VERIFIED',
-    readErrors: {}, truncated: {}}
+    readErrors: {}, truncated: {}},
+  actions: {pull_main_browser: {available: true}}
 });
 const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: false});
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
 let clipboard = null;
-let pulled = false;
+let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
 const requests = [], requestOptions = [];
 const fetch = async (url, options = {}) => {
   requests.push(url); requestOptions.push(options);
@@ -74,12 +87,26 @@ const fetch = async (url, options = {}) => {
     assert.equal(options.headers['X-CSRF-Token'], 'fixture-csrf');
     assert.equal(JSON.parse(options.body).confirm, 'PULL_WINDOWS_MAIN');
     pulled = true;
-    return {ok: true, json: async () => ({state: 'EXECUTED', head: sha('d'),
-      requestId: '22345678-1234-4234-8234-123456789abc'})};
+    return {ok: true, json: async () => uncertainMode ? {
+      state: 'UNCERTAIN', head: null, error: 'WINDOWS_READBACK_UNCONFIRMED',
+      readbackIssues: ['WORKTREE_NOT_CLEAN'], requestId: '22345678-1234-4234-8234-123456789abc'
+    } : {state: 'EXECUTED', head: sha('d'),
+      requestId: '22345678-1234-4234-8234-123456789abc'}};
+  }
+  if (url.includes('/pull-results/')) {
+    uncertainReads++;
+    return {ok: true, json: async () => ({
+      state: uncertainMode && uncertainReads < 2 ? 'UNCERTAIN' : 'EXECUTED',
+      head: uncertainMode && uncertainReads < 2 ? null : sha('d'),
+      error: uncertainMode && uncertainReads < 2 ? 'WINDOWS_READBACK_UNCONFIRMED' : undefined,
+      readbackIssues: uncertainMode && uncertainReads < 2 ? ['WORKTREE_NOT_CLEAN'] : [],
+      requestId: '22345678-1234-4234-8234-123456789abc'
+    })};
   }
   if (url === '/api/v1/repositories') return {ok: true, json: async () => ({
     checkedAt: '2026-11-08T00:00:00Z', errors: [], repositories: [mirror, approvals]})};
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
+    if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Gateway timeout');}
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
     return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
       'updated-task', {checked: true, relation: 'equal'})})};
@@ -89,8 +116,10 @@ const fetch = async (url, options = {}) => {
 const sandbox = vm.createContext({
   document: {getElementById: key => elements[key], createElement: tag => new Element(tag)},
   navigator: {clipboard: {writeText: async value => { clipboard = value; }}},
-  fetch, console, AbortController, Map, Promise,
-  window: {confirm: () => { throw Error('Unexpected second confirmation modal'); }}
+  fetch, console, AbortController, Map, Promise, localStorage, sessionStorage,
+  window: {confirm: () => { throw Error('Unexpected second confirmation modal'); },
+    addEventListener: (event, callback) => winEvents.set(event, callback),
+    removeEventListener: event => winEvents.delete(event)}
 });
 vm.runInContext(source, sandbox, {filename: 'app.js'});
 (async () => {
@@ -104,6 +133,60 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['panel-row'].hidden, false, 'Detail Row tab is initial');
   assert.equal(elements['panel-worktrees'].hidden, true, 'Worktrees must be opt-in');
   assert.match(elements['row-full'].textContent, /MAIN: DOCKER \/ GITHUB \/ WINDOWS/);
+  // Independent group visibility: both hidden => only repository name remains.
+  const headers = elements['main-headers'].children;
+  const columns = elements['main-cols'].children;
+  assert.equal(columns.length, 13);
+  assert.equal(columns[1].style.width, '105px');
+  assert.equal(columns[5].style.width, '113px');
+  assert.equal(columns[9].style.width, '155px');
+  assert.equal(columns[12].style.width, '226px');
+  elements['toggle-docker'].onclick();
+  assert.equal(headers[1].hidden, true);
+  assert.equal(headers[6].hidden, false);
+  assert.equal(headers[11].hidden, false);
+  elements['toggle-windows'].onclick();
+  assert.equal(headers[1].hidden, true);
+  assert.equal(headers[6].hidden, true);
+  assert.equal(headers[11].hidden, true);
+  assert.equal(headers[0].hidden, false);
+  assert.equal(elements['main-table'].style.width, '205px');
+  assert.equal(elements['primary-rows'].children[0].children.filter(cell => !cell.hidden).length, 1);
+  assert.equal(elements['toggle-docker'].attributes['aria-pressed'], 'false');
+  elements['toggle-docker'].onclick();
+  elements['toggle-windows'].onclick();
+  assert.equal(headers[11].hidden, false);
+  const grip = headers[1].children[0];
+  grip.onpointerdown({button: 0, clientX: 100, preventDefault() {}, stopPropagation() {}});
+  winEvents.get('pointermove')({clientX: 157});
+  winEvents.get('pointerup')({});
+  assert.equal(columns[1].style.width, '162px', 'Drag resizes first compact column');
+  assert.equal(JSON.parse(browserStorage.get('fortis.mirror.columns.v1')).widths[1], 162,
+    'Resized column width persisted');
+  grip.onkeydown({key: 'ArrowRight', preventDefault() {}, stopPropagation() {}});
+  assert.equal(columns[1].style.width, '174px', 'Keyboard resizing works');
+  assert.equal(vm.runInContext('readLayout().widths[1]', sandbox), 174,
+    'Stored layout survives re-reading preferences');
+  grip.ondblclick({preventDefault() {}, stopPropagation() {}});
+  assert.equal(columns[1].style.width, '105px', 'Double click restores the default');
+  elements['repo-filter'].value = 'fortis';
+  elements['repo-filter'].oninput();
+  assert.equal(elements['primary-rows'].children.length, 1, 'Search narrows the repository list');
+  elements['repo-filter'].value = '';
+  elements['repo-filter'].oninput();
+  assert.equal(elements['primary-rows'].children.length, 2);
+  elements['repo-filter'].value = 'not-found-anywhere';
+  elements['repo-filter'].oninput();
+  assert.match(elements['primary-rows'].children[0].children[0].textContent, /ничего не найдено/);
+  elements['toggle-docker'].onclick();
+  elements['toggle-windows'].onclick();
+  assert.equal(elements['primary-rows'].children[0].children[0].colSpan, 1,
+    'Empty-filter placeholder remains functional with both groups collapsed');
+  elements['toggle-docker'].onclick();
+  elements['toggle-windows'].onclick();
+  elements['repo-filter'].value = '';
+  elements['repo-filter'].oninput();
+  elements['primary-rows'].children[0].onclick();
   assert.match(elements['row-full'].textContent, new RegExp(sha('a')));
   assert.match(elements['row-full'].textContent, /Windows · Ветка для просмотра: main/);
   assert.match(elements['row-full'].textContent, /GitHub main SHA: НЕ ПРОВЕРЕН/);
@@ -131,16 +214,51 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   assert.equal(elements['tab-row'].attributes['aria-selected'], 'true');
   assert.match(elements['row-full'].textContent, /РАВЕН GITHUB/);
+  elements['only-attention'].checked = true;
+  elements['only-attention'].onchange();
+  assert.equal(elements['primary-rows'].children.length, 1,
+    'Attention filter excludes verified-current repository');
+  elements['only-attention'].checked = false;
+  elements['only-attention'].onchange();
+  elements['primary-rows'].children[1].onclick();
+  failRemoteOnce = true;
+  await elements['selected-remote'].onclick();
+  assert.match(elements['row-full'].textContent, /Проверка GitHub: ОШИБКА/,
+    'Gateway failure must not retain a seemingly-fresh remote status');
+  assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'ОШИБКА ПРОВЕРКИ');
+  assert.equal(elements['pull-windows'].disabled, true, 'Unknown GitHub state blocks Pull UI');
+  await elements['selected-remote'].onclick();
+  assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   assert.equal(elements['pull-windows'].disabled, false, 'Manual Pull is enabled on selected row');
   await elements['pull-windows'].onclick();
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 1,
     'Explicit owner approval triggers exactly one Execute');
-  assert.match(elements['pull-result'].textContent, /Windows main обновлён/);
+  assert.match(elements['pull-result'].textContent, /Windows Pull подтверждён/);
   assert.match(elements['pull-result'].textContent, new RegExp(sha('d')));
   assert.equal(elements['primary-rows'].children.length, 2);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
+  assert.equal(elements['receipt-controls'].hidden, true, 'Successful pull clears readback controls');
+  // A normal UNCERTAIN response reconciles without another Execute.
+  uncertainMode = true;
+  uncertainReads = 0;
+  elements['primary-rows'].children[0].onclick();
+  const beforeUncertain = requests.filter(url => url.endsWith('/pull-execute')).length;
+  await elements['pull-windows'].onclick();
+  assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, beforeUncertain + 1);
+  assert.equal(elements['receipt-controls'].hidden, false, 'Owner sees read-only confirmation button');
+  assert.ok(browserStorage.has('fortis.mirror.pendingPull.v1'),
+    'Uncertain request remains available across page reload in this tab');
+  assert.match(elements['pull-result'].textContent, /Git видит локальные изменения/);
+  assert.equal(elements['pull-windows'].disabled, true, 'No second Pull while receipt unresolved');
+  await elements['check-pull-result'].onclick();
+  assert.equal(elements['receipt-controls'].hidden, true, 'Confirmed receipt closes the warning');
+  assert.ok(!browserStorage.has('fortis.mirror.pendingPull.v1'),
+    'Confirmed receipt is cleared from session storage');
+  assert.match(elements['pull-result'].textContent, /Receipt EXECUTED/);
+  assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, beforeUncertain + 1,
+    'Reconciliation performs no additional Git operation');
   const previewOptions = requestOptions.filter((_, index) => requests[index].endsWith('/pull-preview'));
-  assert.equal(previewOptions.length, 1);
+  assert.equal(previewOptions.length, 2);
   assert.ok(previewOptions.every(opt => opt.method === 'POST' && opt.headers['X-CSRF-Token'] === 'fixture-csrf'));
   console.log('MIRROR_PRIMARY_TABLE_SMOKE_PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});

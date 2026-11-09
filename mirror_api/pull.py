@@ -12,6 +12,7 @@ import re
 import sqlite3
 import subprocess
 import threading
+import time
 from .operations import ObservationError, SHA, checked_at, git, github_main, windows_status, docker_inventory
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
@@ -19,6 +20,13 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 
 class PullDenied(ValueError):
     pass
+
+
+class PullReadbackUnconfirmed(ObservationError):
+    """A successful fast-forward was not confirmed by bounded Git readbacks."""
+    def __init__(self, issues):
+        super().__init__('WINDOWS_READBACK_UNCONFIRMED')
+        self.issues = issues
 
 
 class PullWorker:
@@ -112,6 +120,8 @@ class PullWorker:
                 # Never retry it automatically. Readback/reconcile may resolve it.
                 receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
                            "head": None, "error": str(exc), "checkedAt": checked_at()}
+                if isinstance(exc, PullReadbackUnconfirmed):
+                    receipt['readbackIssues'] = exc.issues
             except Exception:
                 receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
                            "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at()}
@@ -119,6 +129,33 @@ class PullWorker:
                 db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=?",
                            (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
             return receipt
+
+    def _confirmed_readback(self, repo, origin, target):
+        """Retry only Git observation after a successful ff-only; never Git write.
+
+        A Windows checkout may transiently expose a status/index mismatch while
+        file metadata settles. The resulting reason codes are safe to display;
+        changed file names or local paths are not copied into the receipt.
+        """
+        issues = []
+        for delay in (0, 0.2, 0.5):
+            if delay:
+                time.sleep(delay)
+            observed = windows_status(self.mirror.windows_root, repo, origin)
+            issues = []
+            if observed.get('error'):
+                issues.append('GIT_READ_FAILED')
+            if observed.get('head') != target:
+                issues.append('HEAD_MISMATCH')
+            if observed.get('branch') != 'main':
+                issues.append('BRANCH_MISMATCH')
+            if observed.get('clean') is not True:
+                issues.append('WORKTREE_NOT_CLEAN')
+            if observed.get('originValid') is not True:
+                issues.append('ORIGIN_MISMATCH')
+            if not issues:
+                return
+        raise PullReadbackUnconfirmed(issues)
 
     def _execute(self, p):
         repo = p["repoId"]
@@ -172,10 +209,6 @@ class PullWorker:
                 stderr=subprocess.PIPE, timeout=180)
         if update.returncode:
             raise ObservationError("WINDOWS_FF_FAILED")
-        readback = windows_status(self.mirror.windows_root, repo, origin)
-        if (readback["error"] or readback["head"] != p["targetSha"] or
-                readback["branch"] != "main" or readback["clean"] is not True or
-                not readback["originValid"]):
-            raise ObservationError("WINDOWS_READBACK_UNCONFIRMED")
+        self._confirmed_readback(repo, origin, p["targetSha"])
         return {"requestId": p["requestId"], "state": "EXECUTED",
                 "head": p["targetSha"], "checkedAt": checked_at()}

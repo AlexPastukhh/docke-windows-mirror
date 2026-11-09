@@ -1,6 +1,7 @@
 """Offline API and Git observations; no Windows, Docker or network services required."""
 from http.client import HTTPConnection
 import json
+import os
 from pathlib import Path
 from unittest import mock
 import subprocess
@@ -175,6 +176,111 @@ class GitStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class GitWindowsConfigRegressionTests(unittest.TestCase):
+    """Mirror reads must interpret CRLF exactly like ordinary Git for Windows."""
+
+    def test_windows_system_autocrlf_and_porcelain_are_preserved(self):
+        with tempfile.TemporaryDirectory(prefix='mirror-ux-eol-') as folder:
+            root = Path(folder)
+            system = root / 'system.gitconfig'
+            system.write_text('[core]\n    autocrlf = true\n', encoding='utf-8')
+            global_file = root / 'global.gitconfig'
+            global_file.touch()
+            repositories = root / 'Repos'
+            repo = repositories / 'sample'
+            repo.mkdir(parents=True)
+            origin = 'https://github.com/AlexPastukhh/sample.git'
+            env = dict(os.environ, GIT_CONFIG_SYSTEM=str(system),
+                       GIT_CONFIG_GLOBAL=str(global_file))
+            env.pop('GIT_CONFIG_NOSYSTEM', None)
+
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args],
+                    env=env, stderr=subprocess.DEVNULL, timeout=10).decode().strip()
+
+            git('init', '-q')
+            git('checkout', '-q', '-b', 'main')
+            git('remote', 'add', 'origin', origin)
+            doc = repo / 'readme.md'
+            doc.write_bytes(b'first\nsecond\n')
+            git('add', 'readme.md')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=test@example.com',
+                'commit', '-qm', 'initial')
+            doc.unlink()
+            git('checkout', '--', 'readme.md')
+            self.assertEqual(b'first\r\nsecond\r\n', doc.read_bytes())
+            self.assertEqual('', git('status', '--porcelain=v1', '--untracked-files=all'))
+            with mock.patch.dict(os.environ, {
+                'GIT_CONFIG_SYSTEM': str(system), 'GIT_CONFIG_GLOBAL': str(global_file)
+            }):
+                os.environ.pop('GIT_CONFIG_NOSYSTEM', None)
+                observed = windows_status(repositories, 'sample', origin)
+                self.assertTrue(observed['clean'], observed)
+                self.assertEqual([], observed['changedFiles'])
+                doc.write_bytes(b'first\r\nsecond\r\nthird\r\n')
+                changed = windows_status(repositories, 'sample', origin)
+                self.assertFalse(changed['clean'])
+                self.assertEqual([' M readme.md'], changed['changedFiles'],
+                    'Leading porcelain space distinguishes unstaged from staged')
+
+
+class ReadbackRetryTests(unittest.TestCase):
+    """After successful merge, only re-read; never rerun a Git write."""
+
+    def setUp(self):
+        from mirror_api.pull import PullWorker
+        tmp = tempfile.TemporaryDirectory(prefix='mirror-ux-readback-')
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.worker = PullWorker(Mirror(base / 'Repos'), base / 'receipts.sqlite')
+        self.origin = 'https://github.com/AlexPastukhh/sample.git'
+        self.target = 'c' * 40
+
+    def test_transient_dirty_readback_recovers_without_fetch_or_merge(self):
+        dirty = {'error': None, 'head': self.target, 'branch': 'main',
+                 'clean': False, 'originValid': True}
+        clean = dict(dirty, clean=True)
+        with mock.patch('mirror_api.pull.windows_status', side_effect=[dirty, clean]) as check, \
+             mock.patch('mirror_api.pull.subprocess.run') as no_git, \
+             mock.patch('mirror_api.pull.time.sleep') as sleep:
+            self.worker._confirmed_readback('sample', self.origin, self.target)
+        self.assertEqual(2, check.call_count)
+        sleep.assert_called_once_with(0.2)
+        no_git.assert_not_called()
+
+    def test_repeated_mismatch_records_explicit_reasons_without_side_effect(self):
+        from mirror_api.pull import PullReadbackUnconfirmed
+        wrong = {'error': None, 'head': 'd'*40, 'branch': 'task/other',
+                 'clean': False, 'originValid': False}
+        with mock.patch('mirror_api.pull.windows_status', return_value=wrong) as check, \
+             mock.patch('mirror_api.pull.subprocess.run') as no_git, \
+             mock.patch('mirror_api.pull.time.sleep') as sleep:
+            with self.assertRaises(PullReadbackUnconfirmed) as failure:
+                self.worker._confirmed_readback('sample', self.origin, self.target)
+        self.assertEqual('WINDOWS_READBACK_UNCONFIRMED', str(failure.exception))
+        self.assertEqual(['HEAD_MISMATCH', 'BRANCH_MISMATCH',
+                          'WORKTREE_NOT_CLEAN', 'ORIGIN_MISMATCH'], failure.exception.issues)
+        self.assertEqual(3, check.call_count)
+        self.assertEqual(2, sleep.call_count)
+        no_git.assert_not_called()
+
+    def test_readback_issues_are_persisted_in_uncertain_receipt(self):
+        from mirror_api.pull import PullReadbackUnconfirmed
+        body = {'requestId':'12345678-1234-4234-8234-123456789abc',
+            'repoId':'sample','expectedHead':'a'*40,'targetSha':self.target,
+            'origin':self.origin}
+        with mock.patch.object(self.worker, '_execute',
+             side_effect=PullReadbackUnconfirmed(['WORKTREE_NOT_CLEAN'])):
+            receipt = self.worker.run(body, repo_id='sample', allowed_repos={'sample'})
+        self.assertEqual('UNCERTAIN', receipt['state'])
+        self.assertEqual(['WORKTREE_NOT_CLEAN'], receipt['readbackIssues'])
+        self.assertEqual('WINDOWS_READBACK_UNCONFIRMED', receipt['error'])
+        with self.worker._db() as db:
+            record = db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                (body['requestId'],)).fetchone()
+        self.assertEqual(['WORKTREE_NOT_CLEAN'], json.loads(record[0])['readbackIssues'])
+
 
 class DurablePullTests(unittest.TestCase):
     def setUp(self):
