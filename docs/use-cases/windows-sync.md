@@ -2,7 +2,9 @@
 
 ## UC-MIR-002
 
-**Когда:** owner получил PR с подтверждённым merge/CI и хочет обновить Windows main.
+**Когда:** owner получил PR с подтверждённым merge/CI и **Windows-clone нужен
+для работы/проверки/установки**, либо сам запросил Windows main sync. Один
+только факт merge не требует запускать Mirror или Windows PowerShell.
 
 **Цель:** выполнить только проверенный fast-forward Windows primary checkout.
 
@@ -18,5 +20,10 @@ origin и branch, preflight повторить перед изменением �
 fetch не использовать как обход. Если требуемый backend недоступен — STOP,
 не PAT fallback. Source update не запускает Windows listener.
 
-**Готово:** только exact approved SHA получен в Windows и readback совпадает,
-либо указан проверяемый блокер; наличие кнопки Pull само по себе не PASS.
+**Готово:** Mirror показывает `EXECUTED`/receipt для сделанного Pull
+и Windows `main` = verified GitHub `main` SHA при clean/approved origin,
+либо указывает конкретную ошибку или `UNKNOWN`. **Mirror выполняет сравнение SHA
+сам**: после успешного readback не нужно запускать отдельную PowerShell-команду,
+просить владельца переписать SHA в чат или повторять Pull «для проверки».
+При неизвестном результате использовать в том же Mirror `Проверить результат`
+и receipt, а не второй Pull. Наличие одной кнопки Pull без результата — не PASS.

@@ -49,10 +49,15 @@ owner deployment records и условий cleanup.
    remote `main`; обновить чистый Docker `main` через Gateway
    **`workspace.update_main_from_pr`**. Старый `workspace.update_main` требует
    Gateway `mergeRequestId` и не подходит для подтверждения ручного UI merge.
-   Затем выполнить guarded Windows `main` Pull по принятому backend: origin,
-   HEAD/branch/clean, fast-forward ancestry, pin SHA и readback; без reset/stash/force.
-   Source update не означает image build, deploy или restart: это отдельный
-   owner-controlled процесс.
+   **Если Windows-clone нужен для этой задачи или владелец запросил sync**,
+   выполнить guarded Windows `main` Pull через Mirror: origin, HEAD/branch/clean,
+   fast-forward ancestry, pin SHA и readback; без reset/stash/force. Mirror
+   сам проверяет итоговый SHA и показывает receipt: после подтверждённого
+   `EXECUTED` не просить дополнительный PowerShell/SHA readback в чате.
+   Если исход операции неясен, использовать Mirror `Проверить результат`
+   без повторного Pull. Не выполнять Windows sync только ради формального
+   этапа при отсутствии Windows consumer. Source update не означает image
+   build, deploy или restart: это отдельный owner-controlled процесс.
 
 **Чистый primary обязателен:** не редактировать и не копить staged/unstaged/
 untracked изменения в `Repos/<repo>`. Edit/test/stage/commit — только в
