@@ -22,10 +22,18 @@ https://host.docker.internal:443 (default HTTPS 443); no fallback.
   do not copy a Docker worktree or force Git.
 - Windows py.exe -3, git.exe and docker.exe resolve under the owner account;
   fortis-repo-test is running for observational worktree inventory.
-- The owner selects one specific Windows IPv4 interface reachable over a
-  reviewed Docker-to-host route. 127.0.0.1 is safe for host-local checking
-  but not reachable from Docker. 0.0.0.0, broadcast and firewall changes
-  are denied; no network setting is changed automatically.
+- The owner selects one specific Windows IPv4 bind address, verified
+  from the actual Gateway container before persistent startup. On the
+  owner-tested Docker Desktop setup (2026-11-11), binding the Windows
+  process to 127.0.0.1:443 was reachable via
+  https://host.docker.internal (Gateway resolved it to 192.168.65.254).
+  This is an observed host-specific behavior, NOT a universal claim
+  that Docker reaches Windows loopback on every platform/release.
+  Prefer the tested loopback bind if the current probe still succeeds.
+  If that route stops working, STOP and request a new owner-reviewed
+  bind/network decision; never silently switch to a LAN address,
+  wildcard 0.0.0.0 or change firewall rules. Broadcast, wildcard and
+  automatic network changes remain denied.
 - An owner-controlled TLS server certificate/private PEM key, with SAN
   DNS:host.docker.internal, and its issuer chain trusted by the Gateway
   container exist under %LOCALAPPDATA% outside Git. Do not disable TLS
@@ -42,6 +50,43 @@ https://host.docker.internal:443 (default HTTPS 443); no fallback.
   free. No Gateway release, Observatory change or PowerShell Executor
   reconfiguration is included in this step.
 
+## Owner-observed isolated HTTPS acceptance (2026-11-11)
+
+These owner-reported test results do NOT imply a persistent production
+listener, operational certificate or live Gateway provider:
+
+- Temporary Windows exclusive loopback TCP/443 listener received the probe
+  from real fortis-gateway (UID:GID 10001:10001), then stopped.
+- A short-lived synthetic CA and server cert with SAN DNS:host.docker.internal
+  gave WRONG_TLS_HOSTNAME_REJECTED=YES,
+  GATEWAY_TO_WINDOWS_TLS_CA_HOSTNAME=PASS and SYNTHETIC_HTTPS_STATUS_200=YES.
+  Temporary test listener and certificate/key files were removed.
+- The actual mirror_api.gateway_readonly.create_server was then separately
+  bound to Windows 127.0.0.1:443 with another ephemeral TLS identity,
+  independent Bearer and exact allowlist fortis-approvals.
+  From the same Gateway container: absent Bearer 401, browser-cookie-only
+  401, wrong Bearer 401, wrong HTTP Host 403, out-of-scope repository 404,
+  query 404, POST 405, authenticated GET 200. The response contained
+  schemaVersion=1 and exact repo ID; Windows readback was AVAILABLE
+  and GitHub was NOT_CHECKED. The ephemeral listener stopped and the
+  ephemeral key/token files were removed. PUT/PATCH/DELETE denials were
+  covered by offline unit tests only (not the owner HTTPS probe).
+
+These tests do NOT activate the production Windows listener, owner TLS
+material and private ACLs, Gateway vault alias mirror-link, trusted CA
+inside the Gateway RO mount, provider registration or live typed Gateway
+operation. The shared Gateway vault has an unresolved root ownership/mode
+compatibility constraint: do not alter its ACL or create production secrets
+based on these isolated tests. The owner deferred off-host backup.
+
+Source coordination: the accepted Script Center
+Fortis-Owner-PowerShell-Executor.ps1 adapter currently pins Mirror main
+SHA a5cb3e9f61e68331c11337eb5da4af056d27660c. Any newer Mirror
+main commit, even docs-only, causes this separate Script Center adapter
+to fail closed. Before merging this Mirror PR, coordinate a reviewed
+Script Center pin update and Windows rollout. Do not weaken the SHA
+check or switch Windows clone branches to bypass it.
+
 ## Owner-controlled foreground run (after prerequisites)
 
 In normal Windows PowerShell 5.1 (not elevated by default), review the script
@@ -49,7 +94,7 @@ from the **accepted, clean Windows main** first, then launch, substituting
 only actual owner-reviewed values:
 
     $repo = Join-Path $HOME 'Repos\docke-windows-mirror'
-    & (Join-Path $repo 'Start-MirrorGatewayReadOnly.ps1') -SourceSha '<merged-Mirror-main-SHA>' -Bind '<reviewed-Windows-IPv4>' -CertificatePath '<absolute-public-cert-PEM>' -KeyPath '<absolute-private-key-PEM>' -SecretFile '<absolute-owner-only-secret-file>' -AllowedRepo @('fortis-approvals')
+    & (Join-Path $repo 'Start-MirrorGatewayReadOnly.ps1') -SourceSha '<merged-Mirror-main-SHA>' -Bind '127.0.0.1' -CertificatePath '<absolute-public-cert-PEM>' -KeyPath '<absolute-private-key-PEM>' -SecretFile '<absolute-owner-only-secret-file>' -AllowedRepo @('fortis-approvals')
 
 The launcher enforces exact source branch/SHA/clean, owner-local TLS paths,
 protected private ACLs, non-wildcard IPv4 bind, fixed port 443 and exact
