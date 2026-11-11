@@ -1,0 +1,27 @@
+# Release planning source catalog v1. Not evidence of any live deployment.
+schemaVersion: 1
+repository: docke-windows-mirror
+buildUnits: []
+targets:
+  - id: mirror-windows-source
+    deployment:
+      kind: windows-source
+      procedure: docs/WORKFLOW.md
+      environments:
+        - windows-owner
+    verification:
+      - mirror-source-ci
+      - windows-powershell-compile
+      - owner-exact-sha-pull-and-readback
+    inputs:
+      - "*.ps1"
+      - "*.cs"
+      - mirror_api/**
+      - tools/**
+noDeploymentPaths:
+  - docs/**
+  - tests/**
+  - test_mirror*.py
+  - .gitignore
+  - .github/**
+  - README.md
