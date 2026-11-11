@@ -8,7 +8,8 @@ Windows Pull через API/browser UI.
 **Цель:** выбрать поддерживаемый source/runtime и проверить границы доступа.
 
 **Как:** открыть [API-FIRST](../API-FIRST.md) — единственного владельца
-API, source map, команд запуска и acceptance. Source candidate находится
+API и browser behavior; owner-only Windows Gateway READ startup описан в
+[Gateway READ runbook](../GATEWAY-READ-ONLY.md). Source candidate находится
 в `main`; внедрение ручного Browser Pull и отдельного Windows listener/TLS/WebAuthn
 требуют owner acceptance. Сначала установить, какая версия реально запущена, какие
 routes доступны и какие результаты имеют свежий source SHA. Browser UI предоставляет локальное Preview → owner-confirmed Windows Pull, но
