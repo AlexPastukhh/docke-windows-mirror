@@ -63,6 +63,47 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(SHA2,ci['headSha'])
         self.assertFalse(ci['requiredGateVerified'])
 
+    def test_main_history_proves_docker_behind_only_for_pinned_main(self):
+        calls=[]
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_commits(self,repo,*,page,per_page):
+                calls.append((repo,page,per_page))
+                return {'items':[{'sha':SHA1},{'sha':SHA3},{'sha':SHA2}]}
+        result=reader.collect(Client(),REPO,main_only=True,main_ancestor_sha=SHA2)
+        self.assertEqual('behind',result['mainHistory']['relation'])
+        self.assertEqual(SHA1,result['mainHistory']['head'])
+        self.assertEqual(SHA2,result['mainHistory']['candidate'])
+        self.assertEqual([(REPO,1,50)],calls)
+        self.assertEqual({},result['errors'])
+        self.assertIsNone(result['pullRequests'],'Fast read never expands PR/CI')
+
+    def test_main_history_absence_or_moving_head_never_invents_divergence(self):
+        class Client:
+            def __init__(self,first): self.first=first
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_commits(self,repo,*,page,per_page):
+                return {'items':[{'sha':self.first},{'sha':SHA3}]}
+        absent=reader.collect(Client(SHA1),REPO,main_only=True,main_ancestor_sha=SHA2)
+        self.assertEqual('unknown',absent['mainHistory']['relation'])
+        self.assertEqual({},absent['errors'])
+        moved=reader.collect(Client(SHA3),REPO,main_only=True,main_ancestor_sha=SHA2)
+        self.assertIsNone(moved['mainHistory'])
+        self.assertEqual('GATEWAY_MAIN_HISTORY_UNAVAILABLE',moved['errors']['mainHistory'])
+        self.assertEqual(SHA1,moved['head'], 'Failed history read cannot hide known branch SHA')
+
+    def test_main_history_equal_sha_skips_extra_gateway_requests(self):
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                return {'items':[{'name':'main','sha':SHA1}]}
+            def list_commits(self,repo,*,page,per_page):
+                self.fail('Unexpected list_commits')
+        result=reader.collect(Client(),REPO,main_only=True,main_ancestor_sha=SHA1)
+        self.assertIsNone(result['mainHistory'])
+        self.assertEqual({},result['errors'])
+
     def test_registered_repo_scope_required(self):
         class Gateway:
             def __init__(self,**kwargs): pass

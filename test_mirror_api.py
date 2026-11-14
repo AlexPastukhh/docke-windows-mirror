@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from mirror_api.operations import Mirror, ObservationError, windows_status, relation_to_sha, evaluate_actions
+from mirror_api.operations import Mirror, ObservationError, windows_status, relation_to_sha, docker_relation_to_sha, evaluate_actions
 from mirror_api.server import MirrorServer, open_local_browser
 
 
@@ -190,6 +190,24 @@ class GitStatusTests(unittest.TestCase):
         primary['head'] = 'c'*40
         self.assertFalse(evaluate_actions(windows,github,docker_primary=primary)['pull_main_browser']['available'])
 
+    def test_docker_ancestry_read_only_uses_registered_primary_path(self):
+        source, target = 'a'*40, 'b'*40
+        with mock.patch('mirror_api.operations.run', return_value=source) as run:
+            self.assertEqual('behind',docker_relation_to_sha('sample',source,target))
+        argv=run.call_args.args[0]
+        self.assertEqual(['docker','exec','-i','--user','1000:1000','fortis-repo-test'],argv[:6])
+        self.assertIn('--no-optional-locks',argv)
+        self.assertEqual(['merge-base',source,target],argv[-3:])
+        with mock.patch('mirror_api.operations.run', return_value=target):
+            self.assertEqual('ahead',docker_relation_to_sha('sample',source,target))
+        with mock.patch('mirror_api.operations.run', return_value='c'*40):
+            self.assertEqual('diverged',docker_relation_to_sha('sample',source,target))
+        with mock.patch('mirror_api.operations.run', side_effect=ObservationError('NO_OBJECTS')):
+            self.assertEqual('unknown',docker_relation_to_sha('sample',source,target))
+        with mock.patch('mirror_api.operations.run') as run:
+            self.assertEqual('unknown',docker_relation_to_sha('../bad',source,target))
+            run.assert_not_called()
+
     def test_inventory_failed_not_empty(self):
         mirror = Mirror(self.base)
         with mock.patch("mirror_api.operations.docker_inventory", side_effect=ObservationError("DOCKER_DOWN")):
@@ -302,6 +320,43 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.assertEqual('unknown',checked['windows']['relation'])
         self.assertFalse(checked['actions']['pull_main_browser']['available'])
         self.assertEqual(self.old,self.git(self.clone,'rev-parse','HEAD'))
+
+    def test_stale_docker_still_allows_windows_diagnostic_fetch_not_pull(self):
+        self.fetches=[]; self.real_run=subprocess.run
+        self.base_primary['head']=self.old
+        self.gateway['mainHistory']={'head':self.new,'candidate':self.old,
+                                     'relation':'behind','examined':2}
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner), \
+             mock.patch('mirror_api.operations.docker_relation_to_sha') as docker_git:
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual(1,len(self.fetches))
+        self.assertEqual('VERIFIED',checked['windows']['fetchStatus'])
+        self.assertEqual('behind',checked['windows']['relation'])
+        self.assertEqual('behind',checked['docker']['primary']['remoteRelation'])
+        self.assertEqual('GATEWAY_MAIN_HISTORY',checked['docker']['primary']['remoteRelationEvidence'])
+        docker_git.assert_not_called()
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+        self.assertIn('DOCKER_MAIN_NOT_AT_GITHUB_MAIN',
+                      checked['actions']['pull_main_browser']['reasons'])
+        self.assertEqual(self.old,self.git(self.clone,'rev-parse','HEAD'),
+                         'Check may fetch objects but must not move Windows HEAD')
+        self.assertEqual('',self.git(self.clone,'status','--porcelain=v1'))
+
+    def test_stale_docker_windows_already_at_github_no_fetch_no_pull(self):
+        self.fetches=[]; self.real_run=subprocess.run
+        self.git(self.clone,'fetch','-q','--no-tags','origin','main')
+        self.git(self.clone,'merge','--ff-only',self.new)
+        self.base_primary['head']=self.old
+        inv,gateway=self.scoped()
+        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+            checked=self.mirror.check_repository('sample')['repositories'][0]
+        self.assertEqual([],self.fetches)
+        self.assertEqual('NOT_NEEDED',checked['windows']['fetchStatus'])
+        self.assertEqual('equal',checked['windows']['relation'])
+        self.assertFalse(checked['actions']['pull_main_browser']['available'])
+        self.assertIn('DOCKER_MAIN_NOT_AT_GITHUB_MAIN',
+                      checked['actions']['pull_main_browser']['reasons'])
 
     def test_dirty_or_untrusted_clone_never_fetches(self):
         self.fetches=[];self.real_run=subprocess.run
