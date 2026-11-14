@@ -32,3 +32,9 @@
 
 .worktree-check-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:3px 4px 8px;color:#b5c9df}
 .worktree-check-controls button{padding:4px 9px;min-width:auto;font-weight:500}
+
+/* Marking rows is independent of opening a row's details. */
+.repo-mark{vertical-align:middle;margin:0 7px 0 0;accent-color:#8ac7fc;cursor:pointer}
+.main-table tbody tr.marked td:first-child{box-shadow:inset 3px 0 #82baf0}
+.marked-count{color:#a9cfea;white-space:nowrap}
+.main-table tbody tr.checking td:first-child{background:#213d53}

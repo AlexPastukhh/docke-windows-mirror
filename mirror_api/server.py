@@ -34,7 +34,20 @@ class MirrorServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
         self.allow_browser_pull = bool(allow_browser_pull)
         self.browser_pull = BrowserPull(mirror, receipt_db)
+        self.repo_actions = set()
+        self.repo_actions_guard = threading.Lock()
         super().__init__(address, Handler)
+
+    def claim_repo_action(self, repo_id):
+        with self.repo_actions_guard:
+            if repo_id in self.repo_actions:
+                return False
+            self.repo_actions.add(repo_id)
+            return True
+
+    def release_repo_action(self, repo_id):
+        with self.repo_actions_guard:
+            self.repo_actions.discard(repo_id)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -235,15 +248,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         repo_id, action = match.groups()
         session = self.session_id()
+        # An owner Check may fetch Git metadata. Never overlap its writes with
+        # Pull Execute on the same clone, even after browser fetch abort; other
+        # repositories are independent. Preview remains observation-only.
+        locked = action in ('check-windows', 'pull-execute')
+        if locked and not self.server.claim_repo_action(repo_id):
+            self.send(HTTPStatus.CONFLICT, {"error": "REPOSITORY_OPERATION_PENDING"})
+            return
         try:
             if action == 'check-windows':
                 if body:
                     raise PullDenied('OWNER_CHECK_FIELDS_INVALID')
-                data = self.server.mirror.check_repository(repo_id)
-                if len(data.get('repositories', [])) != 1 or data['repositories'][0].get('repoId') != repo_id:
-                    raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
-                result = {"schemaVersion": 1, "checkedAt": data['checkedAt'],
-                          "repository": data['repositories'][0]}
+                # The owner-local and separate Gateway listeners can share one
+                # PullWorker. Its per-clone lock also fences a metadata fetch
+                # against a Gateway Pull for the same Windows Git directory.
+                worker_lock = self.server.browser_pull._worker()._repo_lock(repo_id)
+                if not worker_lock.acquire(blocking=False):
+                    raise PullDenied('REPOSITORY_OPERATION_PENDING')
+                try:
+                    data = self.server.mirror.check_repository(repo_id)
+                    if len(data.get('repositories', [])) != 1 or data['repositories'][0].get('repoId') != repo_id:
+                        raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
+                    result = {"schemaVersion": 1, "checkedAt": data['checkedAt'],
+                              "repository": data['repositories'][0]}
+                finally:
+                    worker_lock.release()
             elif action == "pull-preview":
                 if body:
                     raise PullDenied("PULL_PREVIEW_FIELDS_INVALID")
@@ -255,6 +284,9 @@ class Handler(BaseHTTPRequestHandler):
         except (PullDenied, ObservationError) as exc:
             self.send(HTTPStatus.CONFLICT, {"error": str(exc)})
             return
+        finally:
+            if locked:
+                self.server.release_repo_action(repo_id)
         self.send(HTTPStatus.OK, result)
 
     def do_PUT(self):

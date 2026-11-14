@@ -77,6 +77,8 @@ let clipboard = null;
 let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
 let denyGatewayRead = false;
 let deferRefresh = false, releaseRefresh = null;
+let deferCheckRepo = null, releaseCheck = null;
+const heldCheckRepos = new Set(), heldCheckReleases = new Map(), seenChecks = [];
 const requests = [], requestOptions = [];
 const fetch = async (url, options = {}) => {
   requests.push(url); requestOptions.push(options);
@@ -129,6 +131,9 @@ const fetch = async (url, options = {}) => {
     assert.equal(options.body, '{}', 'No caller-supplied ref/URL/command');
     if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Git metadata fetch failure');}
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'/check-windows'.length));
+    seenChecks.push(name);
+    if (heldCheckRepos.has(name)) await new Promise(resolve => {heldCheckReleases.set(name,resolve);});
+    if (deferCheckRepo === name) await new Promise(resolve => {releaseCheck = resolve;});
     const row = fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
                         'updated-task', {checked:true, relation:'equal'});
     if (denyGatewayRead && name === 'fortis-approvals') {
@@ -305,6 +310,28 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(allRequests.length, 2, 'Check all invokes same CSRF POST for both repositories');
   assert.ok(allRequests.includes('/api/v1/repositories/docke-windows-mirror/check-windows'));
   assert.ok(allRequests.includes('/api/v1/repositories/fortis-approvals/check-windows'));
+  // Marking is orthogonal to active row/details and survives a bulk check.
+  const activeBeforeMark = vm.runInContext('active', sandbox);
+  for (const tr of elements['primary-rows'].children) {
+    const box = tr.children[0].children[0];
+    assert.equal(box.tagName, 'input');
+    box.checked = true;
+    box.onclick({stopPropagation() {}});
+  }
+  assert.equal(vm.runInContext('active', sandbox), activeBeforeMark,
+    'Checkboxes do not change the detail-row selection');
+  assert.match(elements['marked-count'].textContent, /2/);
+  assert.equal(elements['marked-remote'].disabled, false);
+  const beforeMarked = requests.filter(url => url.endsWith('/check-windows')).length;
+  await elements['marked-remote'].onclick();
+  const markedRequests = requests.filter(url => url.endsWith('/check-windows')).slice(beforeMarked);
+  assert.equal(markedRequests.length, 2, 'Exactly the two marked repositories are checked');
+  elements['clear-marked'].onclick();
+  assert.match(elements['marked-count'].textContent, /0/);
+  assert.equal(elements['marked-remote'].disabled, true);
+  elements['mark-visible'].onclick();
+  assert.match(elements['marked-count'].textContent, /2/);
+  elements['clear-marked'].onclick();
   assert.equal(elements['tab-row'].attributes['aria-selected'], 'true');
   assert.match(elements['row-full'].textContent, /РАВЕН GITHUB/);
   elements['only-attention'].checked = true;
@@ -323,8 +350,24 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   await elements['selected-remote'].onclick();
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   assert.equal(elements['pull-windows'].disabled, false, 'Manual Pull is enabled on selected row');
+  // A slow check of a DIFFERENT clone must not disable this owner's Pull.
+  elements['primary-rows'].children[0].onclick();
+  deferCheckRepo = 'docke-windows-mirror';
+  const slowCheck = elements['selected-remote'].onclick();
+  for (let attempts = 0; !releaseCheck && attempts < 15; attempts++)
+    await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof releaseCheck, 'function', 'First selected check is in-flight');
+  elements['primary-rows'].children[1].onclick();
+  assert.equal(elements['pull-windows'].disabled, false,
+    'Pull of another clone remains enabled during an unrelated Windows check');
+  assert.equal(elements['selected-remote'].disabled, false,
+    'Personal check of another clone remains enabled during an unrelated check');
   deferRefresh = true; // Slow Gateway table-read must not block confirmed Pull.
   await elements['pull-windows'].onclick();
+  deferCheckRepo = null;
+  releaseCheck();
+  await slowCheck;
+  releaseCheck = null;
   assert.equal(typeof releaseRefresh, 'function', 'Success schedules a separate table refresh');
   assert.match(elements['pull-result'].textContent, /Время Pull/);
   assert.match(elements['pull-result'].textContent, /Execute Gateway main: 200 мс/);
@@ -349,13 +392,13 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   await elements['pull-windows'].onclick();
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, beforeUncertain + 1);
   assert.equal(elements['receipt-controls'].hidden, false, 'Owner sees read-only confirmation button');
-  assert.ok(browserStorage.has('fortis.mirror.pendingPull.v1'),
+  assert.ok(browserStorage.has('fortis.mirror.pendingPulls.v2'),
     'Uncertain request remains available across page reload in this tab');
   assert.match(elements['pull-result'].textContent, /Git видит локальные изменения/);
   assert.equal(elements['pull-windows'].disabled, true, 'No second Pull while receipt unresolved');
   await elements['check-pull-result'].onclick();
   assert.equal(elements['receipt-controls'].hidden, true, 'Confirmed receipt closes the warning');
-  assert.ok(!browserStorage.has('fortis.mirror.pendingPull.v1'),
+  assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'),
     'Confirmed receipt is cleared from session storage');
   assert.match(elements['pull-result'].textContent, /Receipt EXECUTED/);
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, beforeUncertain + 1,
@@ -363,5 +406,48 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   const previewOptions = requestOptions.filter((_, index) => requests[index].endsWith('/pull-preview'));
   assert.equal(previewOptions.length, 2);
   assert.ok(previewOptions.every(opt => opt.method === 'POST' && opt.headers['X-CSRF-Token'] === 'fixture-csrf'));
+  // Different clones retain independent UNCERTAIN receipts on tab switch.
+  sandbox.pendingA = {repo:'docke-windows-mirror',requestId:'33333333-3333-4333-8333-333333333333',targetSha:sha('a')};
+  sandbox.pendingB = {repo:'fortis-approvals',requestId:'44444444-4444-4444-8444-444444444444',targetSha:sha('d')};
+  vm.runInContext('rememberPendingPull(pendingA.repo,pendingA.requestId,pendingA.targetSha)', sandbox);
+  vm.runInContext('rememberPendingPull(pendingB.repo,pendingB.requestId,pendingB.targetSha)', sandbox);
+  assert.equal(JSON.parse(browserStorage.get('fortis.mirror.pendingPulls.v2')).length,2);
+  elements['primary-rows'].children[0].onclick();
+  assert.match(elements['pull-result'].textContent,/33333333/);
+  assert.equal(elements['receipt-controls'].hidden,false);
+  elements['primary-rows'].children[1].onclick();
+  assert.match(elements['pull-result'].textContent,/44444444/);
+  assert.equal(elements['receipt-controls'].hidden,false);
+  vm.runInContext("clearPendingPull('docke-windows-mirror')",sandbox);
+  assert.equal(JSON.parse(browserStorage.get('fortis.mirror.pendingPulls.v2')).length,1);
+  assert.equal(elements['receipt-controls'].hidden,false,'Other clone receipt remains actionable');
+  vm.runInContext("clearPendingPull('fortis-approvals')",sandbox);
+  assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'));
+  // Check-all + selected checks share a bounded global queue. A queued row
+  // can be promoted, and selected controls remain usable during other work.
+  sandbox.extraRows = ['alpha','beta','gamma','delta'].map(name =>
+    fixture(name,sha('a'),'task-'+name,{checked:false}));
+  vm.runInContext('rows.push(...extraRows);render()',sandbox);
+  for (const name of ['docke-windows-mirror','fortis-approvals','alpha','beta'])
+    heldCheckRepos.add(name);
+  const beforeBulk = seenChecks.length;
+  const bulk = elements['remote'].onclick();
+  for (let tries=0; heldCheckReleases.size<4 && tries<30; tries++)
+    await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(heldCheckReleases.size,4,'At most four concurrent Windows checks');
+  assert.equal(seenChecks.length-beforeBulk,4,'Queued fifth and sixth checks are not started');
+  elements['primary-rows'].children[5].onclick();
+  assert.equal(elements['selected-remote'].disabled,false,'Queued row can be promoted');
+  await elements['selected-remote'].onclick();
+  assert.match(elements['banner'].textContent,/начало очереди/);
+  heldCheckReleases.get('docke-windows-mirror')();
+  heldCheckReleases.delete('docke-windows-mirror');
+  for (let tries=0;seenChecks.length<beforeBulk+5 && tries<30;tries++)
+    await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(seenChecks[beforeBulk+4],'delta','Selected queued repo runs next');
+  for (const release of heldCheckReleases.values()) release();
+  heldCheckReleases.clear();heldCheckRepos.clear();
+  await bulk;
+  assert.equal(seenChecks.length-beforeBulk,6,'All six unique repos checked once');
   console.log('MIRROR_PRIMARY_TABLE_SMOKE_PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});

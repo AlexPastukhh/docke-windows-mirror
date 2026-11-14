@@ -10,11 +10,19 @@ const MAIN_COLUMNS = [
   'Windows · GitHub', 'Windows · Изменения', 'Windows · SHA',
   'Workflow · Итог', 'Workflow · Действие'
 ];
-let rows = [], active = null, detailTab = 'row', checkController = null;
-let pullBusy = false, browserPullEnabled = false;
-let lastPullReceipt = null;
+let rows = [], active = null, detailTab = 'row';
+let browserPullEnabled = false, localBusy = false;
+const markedRepos = new Set();
+const rowVersions = new Map();
+const repoChecks = new Map();
+const checkQueue = [];
+let runningChecks = 0, runningDetailChecks = 0;
+const MAX_CONCURRENT_CHECKS = 4, MAX_CONCURRENT_DETAILS = 1;
+const pullBusyRepos = new Set(), readbackBusyRepos = new Set();
+const pendingPulls = new Map(), pullMessages = new Map();
 const LAYOUT_KEY = 'fortis.mirror.columns.v1';
 const PENDING_PULL_KEY = 'fortis.mirror.pendingPull.v1';
+const PENDING_PULLS_KEY = 'fortis.mirror.pendingPulls.v2';
 // Retain generous widths for the requested key columns; keep others compact.
 const DEFAULT_WIDTHS = [205, 105, 106, 130, 101, 113, 105, 106, 130, 155, 113, 186, 226];
 const MIN_WIDTH = 68, MAX_WIDTH = 640;
@@ -174,24 +182,48 @@ function setupColumns() {
   }
   applyLayout();
 }
+// Each clone owns an independent pending receipt. A legacy single-receipt
+// session is migrated without ever auto-repeating its Git operation.
+function savePendingPulls() {
+  try {
+    if (pendingPulls.size)
+      sessionStorage.setItem(PENDING_PULLS_KEY, JSON.stringify([...pendingPulls.values()]));
+    else sessionStorage.removeItem(PENDING_PULLS_KEY);
+    sessionStorage.removeItem(PENDING_PULL_KEY);
+  } catch (ignored) { /* In-page readback still works without storage. */ }
+}
 function restorePendingPull() {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(PENDING_PULL_KEY));
-    if (saved && isRepoId(saved.repo) && isRequestId(saved.requestId) && isSha(saved.targetSha))
-      lastPullReceipt = saved;
-  } catch (ignored) { /* New session: no automatic Git effects. */ }
-  $('receipt-controls').hidden = !lastPullReceipt;
+    const saved = JSON.parse(sessionStorage.getItem(PENDING_PULLS_KEY));
+    const legacy = JSON.parse(sessionStorage.getItem(PENDING_PULL_KEY));
+    const values = Array.isArray(saved) ? saved : (legacy ? [legacy] : []);
+    for (const item of values.slice(0, 64)) {
+      if (item && isRepoId(item.repo) && isRequestId(item.requestId) && isSha(item.targetSha))
+        pendingPulls.set(item.repo, {repo: item.repo, requestId: item.requestId, targetSha: item.targetSha});
+    }
+    if (legacy && pendingPulls.has(legacy.repo)) savePendingPulls();
+  } catch (ignored) { /* Invalid session data cannot authorize a Pull. */ }
 }
 function rememberPendingPull(repo, requestId, targetSha) {
-  lastPullReceipt = {repo, requestId, targetSha};
-  try { sessionStorage.setItem(PENDING_PULL_KEY, JSON.stringify(lastPullReceipt)); }
-  catch (ignored) { /* In-page reconciliation is still possible. */ }
-  $('receipt-controls').hidden = false;
+  pullMessages.delete(repo); // A new receipt must not show stale success.
+  pendingPulls.set(repo, {repo, requestId, targetSha});
+  savePendingPulls();
+  renderPullState();
 }
-function clearPendingPull() {
-  lastPullReceipt = null;
-  try { sessionStorage.removeItem(PENDING_PULL_KEY); } catch (ignored) { /* Session ended. */ }
-  $('receipt-controls').hidden = true;
+function clearPendingPull(repo) {
+  pendingPulls.delete(repo);
+  savePendingPulls();
+  renderPullState();
+}
+function renderPullState() {
+  const pending = pendingPulls.get(active);
+  const message = pullMessages.get(active) || (pending ?
+    'Есть неподтверждённый Pull для ' + active + ' · Request ID: ' + pending.requestId +
+    '. Используйте «Проверить результат»; новый Pull не запускайте.' : '');
+  $('pull-result').textContent = message;
+  $('pull-result').hidden = !message;
+  $('receipt-controls').hidden = !pending;
+  $('check-pull-result').disabled = !pending || readbackBusyRepos.has(active) || pullBusyRepos.has(active);
 }
 function pullEligible(row) {
   return !!(row && row.actions && row.actions.pull_main_browser &&
@@ -408,10 +440,28 @@ function render() {
   for (const row of visible) {
     const tr = el('tr'); tr.tabIndex = 0; tr.dataset.repo = row.repoId;
     if (row.repoId === active) { tr.classList.add('selected'); tr.setAttribute('aria-selected', 'true'); }
+    if (markedRepos.has(row.repoId)) tr.classList.add('marked');
+    if (repoChecks.has(row.repoId)) tr.classList.add('checking');
     rowFields(row).forEach((field, idx) => {
       const td = el('td', field, idx === 0 ? 'repo-name' : idx === 3 || idx === 8 || idx === 11 ? tone(field) : '');
       td.title = String(field);
       td.hidden = !columnVisible(idx);
+      if (idx === 0) {
+        const checkbox = el('input', undefined, 'repo-mark');
+        checkbox.type = 'checkbox';
+        checkbox.checked = markedRepos.has(row.repoId);
+        checkbox.title = 'Отметить для проверки нескольких репозиториев';
+        checkbox.setAttribute('aria-label', 'Отметить ' + row.repoId);
+        checkbox.onclick = event => {
+          event.stopPropagation();
+          if (checkbox.checked) markedRepos.add(row.repoId); else markedRepos.delete(row.repoId);
+          render();
+        };
+        checkbox.onkeydown = event => event.stopPropagation();
+        td.textContent = '';
+        td.append(checkbox);
+        td.append(el('span', field));
+      }
       tr.append(td);
     });
     tr.onclick = () => { if (active !== row.repoId) { active = row.repoId; render(); } };
@@ -430,13 +480,8 @@ function render() {
   $('selection-title').textContent = chosen ? chosen.repoId : 'Выберите репозиторий';
   $('row-full').textContent = chosen ? rowDetails(chosen) : 'Выберите строку основной таблицы.';
   renderWorktrees(chosen);
-  $('copy-details').disabled = !chosen;
-  $('selected-remote').disabled = !chosen || !!checkController || pullBusy;
-  $('check-worktree-details').disabled = !chosen || !!checkController || pullBusy;
-  $('pull-windows').disabled = !chosen || !!checkController || pullBusy ||
-    !browserPullEnabled || !!lastPullReceipt || !pullEligible(chosen);
-  $('pull-windows').title = !browserPullEnabled ? 'Локальный Windows Pull не настроен' :
-    lastPullReceipt ? 'Сначала проверьте результат предыдущего Pull' : pullBlockers(chosen);
+  renderPullState();
+  updateControls();
 }
 function renderWorktrees(row) {
   const body = $('worktree-rows'); body.replaceChildren();
@@ -488,117 +533,220 @@ async function copyDetails() {
     $('banner').textContent = 'Буфер обмена недоступен: выделите текст нижнего блока и нажмите Ctrl+C.';
   }
 }
-function setBusy(busy) {
-  $('local').disabled = busy;
-  $('remote').disabled = busy;
-  $('selected-remote').disabled = busy || !active;
-  $('check-worktree-details').disabled = busy || !active;
-  const current = rows.find(row => row.repoId === active);
-  $('pull-windows').disabled = busy || !active || !browserPullEnabled ||
-    !!lastPullReceipt || !pullEligible(current);
-  $('check-pull-result').disabled = busy || !lastPullReceipt;
-  $('cancel').disabled = !checkController;
+function selectedVisibleRepos() {
+  const query = $('repo-filter').value.trim().toLocaleLowerCase();
+  const attention = $('only-attention').checked;
+  return rows.filter(row => (!query || row.repoId.toLocaleLowerCase().includes(query)) &&
+    (!attention || overall(row)[0] !== 'АКТУАЛЕН')).map(row => row.repoId);
 }
-function replaceRows(items) {
+function updateControls() {
+  const row = rows.find(item => item.repoId === active);
+  const job = repoChecks.get(active);
+  const checkingClone = Boolean(job && job.started);
+  const pending = pendingPulls.has(active);
+  const busy = pullBusyRepos.has(active) || readbackBusyRepos.has(active);
+  $('local').disabled = localBusy;
+  $('remote').disabled = !rows.length;
+  $('selected-remote').disabled = !row || checkingClone || busy || pending;
+  $('check-worktree-details').disabled = !row || !!job || busy || pending;
+  $('marked-remote').disabled = ![...markedRepos].some(name => rows.some(row => row.repoId === name));
+  $('mark-visible').disabled = !selectedVisibleRepos().length;
+  $('clear-marked').disabled = !markedRepos.size;
+  $('marked-count').textContent = 'Отмечено: ' + markedRepos.size;
+  $('pull-windows').disabled = !row || checkingClone || busy || pending ||
+    !browserPullEnabled || !pullEligible(row);
+  $('pull-windows').title = !browserPullEnabled ? 'Локальный Windows Pull не настроен' :
+    pending ? 'Сначала проверьте результат Pull этого репозитория' :
+      checkingClone ? 'Пока выполняется Windows fetch для этого репозитория' : pullBlockers(row);
+  $('check-pull-result').disabled = !pending || busy || checkingClone;
+  $('cancel').disabled = !repoChecks.size;
+}
+function replaceRows(items, observedVersions = null) {
   if (!Array.isArray(items)) throw new Error('INVALID_REPOSITORY_LIST');
-  rows = items;
+  // A local snapshot started before a targeted check must not erase the
+  // newer verified evidence when the slower GET returns out of order.
+  rows = items.map(item => {
+    if (!observedVersions || (rowVersions.get(item.repoId) || 0) ===
+        (observedVersions.get(item.repoId) || 0)) return item;
+    return rows.find(current => current.repoId === item.repoId) || item;
+  });
+  for (const name of markedRepos) if (!rows.some(row => row.repoId === name)) markedRepos.delete(name);
   if (!rows.some(row => row.repoId === active)) active = rows[0] ? rows[0].repoId : null;
   render();
 }
 async function loadLocal() {
-  if (checkController || pullBusy) return;
+  if (localBusy) return;
+  localBusy = true;
+  const observedVersions = new Map(rowVersions);
+  updateControls();
   $('banner').textContent = 'Чтение Docker primary и Windows…';
-  $('local').disabled = $('remote').disabled = $('selected-remote').disabled = true;
   try {
     const response = await fetch('/api/v1/repositories', {cache: 'no-store'});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
-    replaceRows(data.repositories);
+    replaceRows(data.repositories, observedVersions);
     $('banner').textContent = 'Docker: ' + rows.length + ' репозиториев · ' + data.checkedAt +
       ' · GitHub проверяется отдельно' + ((data.errors || []).length ? ' · Ошибки: ' + data.errors.join(', ') : '');
   } catch (error) {
     $('banner').textContent = 'Не удалось обновить Docker/Windows: ' + error.message + ' · предыдущие результаты сохранены';
-  } finally { setBusy(false); }
+  } finally { localBusy = false; updateControls(); }
 }
-async function checkRemote(all, details = false) {
-  if (checkController || pullBusy || !rows.length || (!all && !active) || (all && details)) return;
-  const names = all ? rows.map(row => row.repoId) : [active];
-  checkController = new AbortController();
-  const signal = checkController.signal;
-  setBusy(true);
-  let index = 0, completed = 0, githubUnverified = 0, windowsFetchErrors = 0, requestErrors = 0;
-  const checkSummary = () => 'GitHub не подтверждён: ' + githubUnverified +
-    ', ошибок Windows fetch: ' + windowsFetchErrors + ', ошибок запросов: ' + requestErrors;
-  const started = Date.now();
-  $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main + Windows fetch') + ': 0 из ' + names.length;
-  const worker = async (csrf) => {
-    while (index < names.length && !signal.aborted) {
-      const name = names[index++];
+function finishCheckJob(job) {
+  if (repoChecks.get(job.name) === job) repoChecks.delete(job.name);
+  job.resolve();
+  render();
+}
+function cancelQueuedCheck(name) {
+  const job = repoChecks.get(name);
+  if (!job || job.started) return false;
+  const index = checkQueue.indexOf(job);
+  if (index !== -1) checkQueue.splice(index, 1);
+  job.controller.abort();
+  finishCheckJob(job);
+  return true;
+}
+function pumpCheckQueue() {
+  while (runningChecks < MAX_CONCURRENT_CHECKS) {
+    const pos = checkQueue.findIndex(job => !job.controller.signal.aborted &&
+      (!job.details || runningDetailChecks < MAX_CONCURRENT_DETAILS));
+    if (pos < 0) break;
+    const [job] = checkQueue.splice(pos, 1);
+    // Pull of this clone may have begun while the check was waiting.
+    if (pullBusyRepos.has(job.name) || pendingPulls.has(job.name)) {
+      finishCheckJob(job);
+      continue;
+    }
+    job.started = true;
+    runningChecks++;
+    if (job.details) runningDetailChecks++;
+    updateControls();
+    (async () => {
       try {
-        const endpoint = '/api/v1/repositories/' + encodeURIComponent(name);
-        const response = details ?
+        const endpoint = '/api/v1/repositories/' + encodeURIComponent(job.name);
+        const signal = job.controller.signal;
+        const response = job.details ?
           await fetch(endpoint + '?remote=details', {cache: 'no-store', signal}) :
-          await fetch(endpoint + '/check-windows', {
-            method: 'POST', cache: 'no-store', signal,
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: '{}'
-          });
+          await fetch(endpoint + '/check-windows', {method:'POST', cache:'no-store', signal,
+            headers:{'Content-Type':'application/json', 'X-CSRF-Token': await job.csrf}, body:'{}'});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
-        const at = rows.findIndex(row => row.repoId === name);
-        if (!ghChecked(data.repository)) githubUnverified++;
-        if (!details && data.repository.windows && data.repository.windows.fetchError) windowsFetchErrors++;
+        if (signal.aborted) return;
+        if (!ghChecked(data.repository)) job.batch.githubUnverified++;
+        if (!job.details && data.repository.windows && data.repository.windows.fetchError)
+          job.batch.windowsFetchErrors++;
+        const at = rows.findIndex(row => row.repoId === job.name);
         if (at >= 0) {
           data.repository.remoteCheckedAt = data.checkedAt;
-          data.repository.worktreeCheckedAt = details ? data.checkedAt : null;
+          data.repository.worktreeCheckedAt = job.details ? data.checkedAt : null;
           data.repository.remoteCheckError = null;
           rows[at] = data.repository;
+          rowVersions.set(job.name, (rowVersions.get(job.name) || 0) + 1);
           render();
         }
       } catch (error) {
-        if (!signal.aborted) {
-          requestErrors++;
-          githubUnverified++;
-          const at = rows.findIndex(row => row.repoId === name);
-          if (at >= 0) {
-            rows[at].remoteCheckError = 'Проверка GitHub / Windows fetch не выполнена';
+        if (!job.controller.signal.aborted) {
+          job.batch.requestErrors++;
+          job.batch.githubUnverified++;
+          const row = rows.find(item => item.repoId === job.name);
+          if (row) {
+            row.remoteCheckError = 'Проверка GitHub / Windows fetch не выполнена: ' + error.message;
             render();
           }
         }
       } finally {
-        if (!signal.aborted) {
-          completed++;
-          $('banner').textContent = 'Проверено ' + completed + ' из ' + names.length +
-            ' · ' + checkSummary() + ' · ' + name +
-            ' · ' + ((Date.now() - started) / 1000).toFixed(1) + ' с';
+        runningChecks--;
+        if (job.details) runningDetailChecks--;
+        if (!job.controller.signal.aborted) {
+          job.batch.completed++;
+          $('banner').textContent = 'Проверено ' + job.batch.completed + ' из ' + job.batch.total +
+            ' · GitHub не подтверждён: ' + job.batch.githubUnverified +
+            ', ошибок Windows fetch: ' + job.batch.windowsFetchErrors +
+            ', ошибок запросов: ' + job.batch.requestErrors + ' · ' + job.name +
+            ' · ' + ((Date.now() - job.batch.started) / 1000).toFixed(1) + ' с';
+        }
+        finishCheckJob(job);
+        pumpCheckQueue();
+      }
+    })();
+  }
+}
+function cancelChecks() {
+  for (const job of [...repoChecks.values()]) {
+    if (job.started) job.controller.abort();
+    else cancelQueuedCheck(job.name);
+  }
+  $('banner').textContent = 'Отмена проверок запрошена. Pull других репозиториев не затронут.';
+  updateControls();
+}
+async function checkRemote(mode = 'one', details = false) {
+  const names = mode === 'all' ? rows.map(row => row.repoId) :
+    mode === 'marked' ? [...markedRepos] : (active ? [active] : []);
+  if (!names.length || (mode === 'all' && details)) return;
+  const batch = {started:Date.now(),total:0,completed:0,skipped:0,promoted:false,
+    githubUnverified:0,windowsFetchErrors:0,requestErrors:0};
+  // GET /csrf is shared by one batch and never authorizes a write.
+  const tasks = [], newJobs = [];
+  for (const name of new Set(names)) {
+    if (!rows.some(row => row.repoId === name)) continue;
+    const existing = repoChecks.get(name);
+    if (existing) {
+      // One selected row can be promoted ahead of a slow bulk queue.
+      if (mode === 'one' && !existing.started) {
+        const pos = checkQueue.indexOf(existing);
+        if (pos >= 0) {
+          checkQueue.splice(pos,1);checkQueue.unshift(existing);
+          batch.promoted = true;
         }
       }
+      batch.skipped++;
+      continue;
     }
-  };
-  try {
-    // Owner check may write Windows Git metadata, so use a CSRF-gated POST.
-    // Keep the ordinary GET inventory and detailed PR/CI GET strictly read-only.
-    const csrf = details ? null : (await jsonResponse(await fetch('/api/v1/csrf',
-      {cache: 'no-store', signal}))).csrf;
-    await Promise.all(Array.from({length: Math.min(details ? 1 : 4, names.length)},
-      () => worker(csrf)));
-    $('banner').textContent = signal.aborted ?
-      'Проверка отменена; обработанные строки и сведения сохранены.' :
-      'Проверка завершена: ' + completed + ' из ' + names.length + ' · ' + checkSummary() +
-        ', время ' + ((Date.now() - started) / 1000).toFixed(1) + ' с. Отдельные ошибки в нижнем блоке.';
-  } catch (error) {
-    if (!signal.aborted) {
-      for (const name of names) {
-        const row = rows.find(item => item.repoId === name);
-        if (row) row.remoteCheckError = 'Проверка не запущена: ' + error.message;
-      }
-      render();
-      $('banner').textContent = 'Не удалось начать проверку: ' + error.message;
+    if (pullBusyRepos.has(name) || pendingPulls.has(name)) {batch.skipped++;continue;}
+    let resolve;
+    const done = new Promise(end => {resolve = end;});
+    const job = {name,details,csrf:null,batch,controller:new AbortController(),
+      started:false,resolve};
+    newJobs.push(job);
+    repoChecks.set(name,job);
+    checkQueue.push(job);
+    tasks.push(done);
+    batch.total++;
+  }
+  if (!tasks.length) {
+    $('banner').textContent = batch.promoted ?
+      'Выбранный репозиторий перемещён в начало очереди проверок.' :
+      'Новые проверки не назначены: строки уже проверяются или имеют незавершённый Pull.';
+    pumpCheckQueue();
+    updateControls();
+    return;
+  }
+  if (!details) {
+    try {
+      const csrf = jsonResponse(await fetch('/api/v1/csrf', {cache:'no-store'}))
+        .then(data => data.csrf);
+      for (const job of newJobs) job.csrf = csrf;
+    } catch (error) {
+      for (const job of newJobs) cancelQueuedCheck(job.name);
+      $('banner').textContent = 'Не удалось начать проверку (CSRF): ' + error.message;
+      return;
     }
-  } finally { checkController = null; setBusy(false); }
+  }
+  $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main + Windows fetch') +
+    ': 0 из ' + batch.total + ' (очередь общая, максимум 4 запроса)';
+  render();
+  pumpCheckQueue();
+  await Promise.all(tasks);
+  $('banner').textContent = 'Проверка завершена: ' + batch.completed + ' из ' + batch.total +
+    ' · GitHub не подтверждён: ' + batch.githubUnverified +
+    ', ошибок Windows fetch: ' + batch.windowsFetchErrors +
+    ', ошибок запросов: ' + batch.requestErrors +
+    (batch.skipped ? ', пропущено занятых: ' + batch.skipped : '') +
+    ', время ' + ((Date.now()-batch.started)/1000).toFixed(1) + ' с.';
+  updateControls();
 }
-function showPullResult(message) {
-  $('pull-result').textContent = message;
-  $('pull-result').hidden = !message;
+function showPullResult(message, repo = active) {
+  if (repo) pullMessages.set(repo, message);
+  if (repo === active) renderPullState();
 }
 async function jsonResponse(response) {
   const data = await response.json();
@@ -624,13 +772,15 @@ async function readPullReceipt(repo, requestId) {
     '/pull-results/' + encodeURIComponent(requestId), {cache: 'no-store'}));
 }
 async function refreshRepository(repo) {
+  const version = rowVersions.get(repo) || 0;
   const result = await jsonResponse(await fetch('/api/v1/repositories/' +
     encodeURIComponent(repo) + '?remote=true', {cache: 'no-store'}));
   const at = rows.findIndex(row => row.repoId === repo);
-  if (at >= 0) {
+  if (at >= 0 && version === (rowVersions.get(repo) || 0)) {
     result.repository.remoteCheckedAt = result.checkedAt;
     result.repository.remoteCheckError = null;
     rows[at] = result.repository;
+    rowVersions.set(repo, version + 1);
     render();
   }
 }
@@ -660,43 +810,50 @@ function pullTimingSummary(previewTimings, receiptTimings, elapsed) {
 async function reconcilePullResult(saved, {previewTimings = null, startedAt = null} = {}) {
   const receipt = await readPullReceipt(saved.repo, saved.requestId);
   if (receipt.state === 'EXECUTED' && receipt.head === saved.targetSha) {
-    clearPendingPull();
+    clearPendingPull(saved.repo);
     const confirmed = 'Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
       '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.' +
       pullTimingSummary(previewTimings, receipt.timingsMs,
         startedAt === null ? null : Date.now() - startedAt);
-    showPullResult(confirmed);
+    showPullResult(confirmed, saved.repo);
     // The receipt has already proven success. A fresh, read-only table refresh
     // may take seconds through Gateway; it must not keep Pull "in progress".
     refreshRepository(saved.repo).catch(() => {
-      showPullResult(confirmed + ' Обновление таблицы не удалось; нажмите «Проверить выбранный».');
+      showPullResult(confirmed + ' Обновление таблицы не удалось; нажмите «Проверить выбранный».', saved.repo);
     });
     return true;
   }
-  showPullResult(receiptMessage(receipt));
+  showPullResult(receiptMessage(receipt), saved.repo);
   return false;
 }
 async function verifyPullResult() {
-  if (!lastPullReceipt || pullBusy || checkController) return;
-  const saved = {...lastPullReceipt};
-  pullBusy = true;
-  setBusy(true);
-  showPullResult('Читаю сохранённый результат Pull ' + saved.requestId + ' без нового Git…');
+  const repo = active;
+  const saved = pendingPulls.get(repo);
+  if (!saved || pullBusyRepos.has(repo) || readbackBusyRepos.has(repo) || repoChecks.get(repo)?.started) return;
+  readbackBusyRepos.add(repo);
+  updateControls();
+  showPullResult('Читаю сохранённый результат Pull ' + saved.requestId + ' без нового Git…', repo);
   try { await reconcilePullResult(saved); }
   catch (error) {
     showPullResult('Результат Pull пока недоступен: ' + error.message +
-      '. Повторите только «Проверить результат» или проверьте Git вручную. Request ID: ' + saved.requestId);
-  } finally { pullBusy = false; setBusy(false); render(); }
+      '. Нажмите «Проверить результат»; Git не запускается. Request ID: ' + saved.requestId, repo);
+  } finally { readbackBusyRepos.delete(repo); render(); }
 }
 async function pullWindows() {
-  if (!browserPullEnabled || !active || checkController || pullBusy || lastPullReceipt) return;
   const repo = active;
+  const chosen = rows.find(row => row.repoId === repo);
+  if (!browserPullEnabled || !repo || !pullEligible(chosen) ||
+      pullBusyRepos.has(repo) || readbackBusyRepos.has(repo) || pendingPulls.has(repo) ||
+      repoChecks.get(repo)?.started) return;
+  // A bulk check queued for the same clone can be cancelled in favor of the
+  // owner's explicit Pull. A *running* check cannot be interrupted safely.
+  cancelQueuedCheck(repo);
+  if (repoChecks.has(repo)) return;
   const startedAt = Date.now();
-  let previewTimings = null;
-  pullBusy = true;
-  setBusy(true);
-  showPullResult('Проверка Windows main и GitHub main для ' + repo + '…');
-  let requestId = null;
+  let previewTimings = null, requestId = null;
+  pullBusyRepos.add(repo);
+  render();
+  showPullResult('Проверка Windows main и GitHub main для ' + repo + '…', repo);
   try {
     const csrf = await jsonResponse(await fetch('/api/v1/csrf', {cache: 'no-store'}));
     const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': csrf.csrf};
@@ -707,18 +864,13 @@ async function pullWindows() {
     previewTimings = preview.timingsMs || null;
     if (!preview.available) {
       showPullResult('Pull Windows main недоступен для ' + repo + ': ' +
-        (preview.reasons || []).join(', ') + '. Git не изменён.');
+        (preview.reasons || []).join(', ') + '. Git не изменён.', repo);
       return;
     }
     requestId = preview.requestId;
     rememberPendingPull(repo, requestId, preview.targetSha);
-    // The owner's click on Pull Windows is the confirmation. Do not show a
-    // second browser modal. Preserve the one-use server-side Preview → Execute
-    // protocol and its fresh SHA/origin/clean/fast-forward preconditions.
-    showPullResult('Проверки пройдены: ' + repo + ' · Windows ' + preview.windowsHead +
-      ' → GitHub ' + preview.targetSha + '. Начинаю guarded fast-forward…');
     showPullResult('Выполняется проверенный fetch + fast-forward для ' + repo +
-      ' до ' + preview.targetSha + '. Не повторяйте Pull до результата.');
+      ' до ' + preview.targetSha + '. Не повторяйте Pull до результата.', repo);
     const receipt = await jsonResponse(await fetch(prefix + '/pull-execute', {
       method: 'POST', headers,
       body: JSON.stringify({previewId: preview.previewId, confirm: 'PULL_WINDOWS_MAIN'}),
@@ -728,22 +880,21 @@ async function pullWindows() {
       await reconcilePullResult({repo, requestId, targetSha: preview.targetSha},
         {previewTimings, startedAt});
     } else {
-      showPullResult(receiptMessage(receipt));
-      // One immediate read-only reconciliation avoids the manual F12 workflow.
-      // A still-uncertain result retains a visible button for the owner.
+      showPullResult(receiptMessage(receipt), repo);
       try { await reconcilePullResult({repo, requestId, targetSha: preview.targetSha},
         {previewTimings, startedAt}); }
       catch (error) {
-        showPullResult(receiptMessage(receipt) + ' Проверка receipt недоступна: ' + error.message);
+        showPullResult(receiptMessage(receipt) + ' Проверка receipt недоступна: ' + error.message, repo);
       }
     }
   } catch (error) {
     let observed = '';
-    if (requestId && lastPullReceipt) {
+    const pending = pendingPulls.get(repo);
+    if (requestId && pending) {
       try {
         const result = await readPullReceipt(repo, requestId);
-        if (result.state === 'EXECUTED' && result.head === lastPullReceipt.targetSha) {
-          await reconcilePullResult(lastPullReceipt, {previewTimings, startedAt});
+        if (result.state === 'EXECUTED' && result.head === pending.targetSha) {
+          await reconcilePullResult(pending, {previewTimings, startedAt});
           return;
         }
         observed = '. ' + receiptMessage(result);
@@ -751,10 +902,9 @@ async function pullWindows() {
     }
     showPullResult('Pull Windows для ' + repo + ': ' + error.message + observed +
       (requestId ? '. Нажмите «Проверить результат»; повторный Pull не запускайте. Request ID: ' + requestId :
-        '. Git не запускался через этот запрос.'));
+        '. Git не запускался через этот запрос.'), repo);
   } finally {
-    pullBusy = false;
-    setBusy(false);
+    pullBusyRepos.delete(repo);
     render();
   }
 }
@@ -768,10 +918,13 @@ $('repo-filter').oninput = render;
 $('only-attention').onchange = render;
 $('check-pull-result').onclick = verifyPullResult;
 $('local').onclick = loadLocal;
-$('remote').onclick = () => checkRemote(true);
-$('selected-remote').onclick = () => checkRemote(false);
-$('check-worktree-details').onclick = () => checkRemote(false, true);
-$('cancel').onclick = () => { if (checkController) checkController.abort(); };
+$('remote').onclick = () => checkRemote('all');
+$('marked-remote').onclick = () => checkRemote('marked');
+$('selected-remote').onclick = () => checkRemote('one');
+$('check-worktree-details').onclick = () => checkRemote('one', true);
+$('mark-visible').onclick = () => { for (const name of selectedVisibleRepos()) markedRepos.add(name); render(); };
+$('clear-marked').onclick = () => { markedRepos.clear(); render(); };
+$('cancel').onclick = cancelChecks;
 $('pull-windows').onclick = pullWindows;
 async function initialize() {
   $('copy-details').disabled = true;
@@ -781,9 +934,7 @@ async function initialize() {
   activateTab('row');
   setupColumns();
   restorePendingPull();
-  if (lastPullReceipt) showPullResult('Есть неподтверждённый результат Pull для ' +
-    lastPullReceipt.repo + ' · Request ID: ' + lastPullReceipt.requestId +
-    '. Используйте «Проверить результат», не запускайте новый Pull.');
+  // Pending receipts appear when their own row becomes active.
   try {
     const response = await fetch('/api/v1/capabilities', {cache: 'no-store'});
     const caps = await response.json();
