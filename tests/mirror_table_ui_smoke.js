@@ -253,6 +253,23 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(elements['primary-rows'].children.length, 2, 'Remote refresh does not add task rows');
   assert.equal(elements['primary-rows'].children[1].classList.contains('selected'), true);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
+  // Docker main can be proven behind while Windows also trails GitHub:
+  // the browser must name both discrepancies and the actual Pull blocker.
+  const stale = vm.runInContext("rows.find(row => row.repoId === 'fortis-approvals')", sandbox);
+  stale.github.head = sha('d'); stale.github.branches.main = sha('d');
+  stale.docker.primary.remoteRelation = 'behind';
+  stale.docker.primary.remoteRelationEvidence = 'GATEWAY_MAIN_HISTORY';
+  stale.windows.relation = 'behind';
+  stale.actions.pull_main_browser = {available: false, reasons: ['DOCKER_MAIN_NOT_AT_GITHUB_MAIN']};
+  vm.runInContext('render()', sandbox);
+  assert.equal(elements['primary-rows'].children[1].children[3].textContent, 'ОТСТАЁТ ОТ GITHUB');
+  assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'DOCKER ОТСТАЁТ');
+  assert.match(elements['row-full'].textContent, /Windows main ↔ GitHub: ОТСТАЁТ ОТ GITHUB/);
+  assert.match(elements['row-full'].textContent, /Доказательство Docker ↔ GitHub: GATEWAY_MAIN_HISTORY/);
+  assert.match(elements['row-full'].textContent, /Почему Windows Pull недоступен: Docker main не совпадает/);
+  assert.equal(elements['pull-windows'].disabled, true);
+  assert.match(elements['pull-windows'].title, /сначала обновите Docker main/);
+  await elements['selected-remote'].onclick(); // Next owner check replaces stale test fixture.
   const beforeAll = requests.filter(url => url.endsWith('/check-windows')).length;
   await elements['remote'].onclick();
   const allRequests = requests.filter(url => url.endsWith('/check-windows')).slice(beforeAll);

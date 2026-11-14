@@ -38,6 +38,8 @@ MAX_CHECK_HEADS = 10
 MAX_VERIFY_CLOSED = 25
 BRANCH_PAGE_SIZE = 100
 MAX_BRANCH_PAGES = 5
+MAX_MAIN_HISTORY_PAGES = 3
+MAX_MAIN_HISTORY_PAGE_SIZE = 50
 
 
 def pages(fetch):
@@ -55,7 +57,7 @@ def pages(fetch):
     return items, True
 
 
-def collect(client, repo, *, worktree_branches=None, main_only=False):
+def collect(client, repo, *, worktree_branches=None, main_only=False, main_ancestor_sha=None):
     """Snapshot independent Gateway reads concurrently; retain all unknowns.
 
     Each typed read uses a fresh HTTPS request and its own immutable request ID.
@@ -66,7 +68,7 @@ def collect(client, repo, *, worktree_branches=None, main_only=False):
     started = time.monotonic()
     results = dict(schema='fortis.github.mirror.v1', repoId=repo,
                    head=None, branches={}, pullRequests=None, workflowRuns=None,
-                   checkRuns={}, errors={}, truncated={}, source='fortis-gateway')
+                   checkRuns={}, errors={}, truncated={}, mainHistory=None, source='fortis-gateway')
     scope = None if worktree_branches is None else frozenset(worktree_branches)
     timings = {}
 
@@ -96,6 +98,45 @@ def collect(client, repo, *, worktree_branches=None, main_only=False):
                 break
         return branches, truncated
 
+    def read_main_history(head):
+        """Prove only ancestry on pinned default/main; absence is never divergence."""
+        if not SHA.fullmatch(head) or not SHA.fullmatch(main_ancestor_sha):
+            raise ValueError('GATEWAY_MAIN_HISTORY_INPUT_INVALID')
+        examined = 0
+        for page in range(1, MAX_MAIN_HISTORY_PAGES + 1):
+            batch = client.list_commits(repo, page=page, per_page=MAX_MAIN_HISTORY_PAGE_SIZE)
+            if type(batch) is not dict or type(batch.get('items')) is not list:
+                raise ValueError('GATEWAY_MAIN_HISTORY_INVALID')
+            items = batch['items']
+            if len(items) > MAX_MAIN_HISTORY_PAGE_SIZE or not items:
+                raise ValueError('GATEWAY_MAIN_HISTORY_INVALID')
+            shas = [row.get('sha') if type(row) is dict else None for row in items]
+            if any(type(sha) is not str or not SHA.fullmatch(sha) for sha in shas):
+                raise ValueError('GATEWAY_MAIN_HISTORY_INVALID')
+            # list_commits uses GitHub's default branch. If it moved or is
+            # different from main, no claim about the checked main is safe.
+            if page == 1 and shas[0] != head:
+                raise ValueError('GATEWAY_MAIN_HISTORY_HEAD_CHANGED')
+            examined += len(shas)
+            if main_ancestor_sha in shas:
+                return {'head': head, 'candidate': main_ancestor_sha,
+                        'relation': 'behind', 'examined': examined}
+            if len(items) < MAX_MAIN_HISTORY_PAGE_SIZE:
+                break
+        return {'head': head, 'candidate': main_ancestor_sha,
+                'relation': 'unknown', 'examined': examined}
+
+    def attach_main_history():
+        if (main_ancestor_sha is None or results['head'] is None or
+                main_ancestor_sha == results['head']):
+            return
+        began = time.monotonic()
+        try:
+            results['mainHistory'] = read_main_history(results['head'])
+        except (Denied, ValueError, TypeError, KeyError):
+            results['errors']['mainHistory'] = 'GATEWAY_MAIN_HISTORY_UNAVAILABLE'
+        timings['mainHistory'] = round((time.monotonic() - began) * 1000)
+
     def read_pulls():
         return pages(lambda page: client.list_pull_requests(
             repo, state='all', page=page, per_page=PAGE_SIZE))
@@ -118,6 +159,7 @@ def collect(client, repo, *, worktree_branches=None, main_only=False):
                 results['errors']['branches'] = 'GATEWAY_MAIN_UNVERIFIED'
         except (Denied, ValueError, TypeError, KeyError):
             results['errors']['branches'] = 'GATEWAY_BRANCH_READ_UNAVAILABLE'
+        attach_main_history()
         timings['total'] = round((time.monotonic() - started) * 1000)
         results['timingsMs'] = timings
         return results
@@ -189,6 +231,7 @@ def collect(client, repo, *, worktree_branches=None, main_only=False):
         except (Denied, ValueError, TypeError, KeyError):
             results['errors']['workflowRuns'] = 'GATEWAY_CI_READ_UNAVAILABLE'
 
+    attach_main_history()
     checks_start = time.monotonic()
     if results['pullRequests'] is not None:
         live = [pr for pr in results['pullRequests'] if pr['state'] == 'open']
@@ -218,7 +261,7 @@ def collect(client, repo, *, worktree_branches=None, main_only=False):
     results['timingsMs'] = timings
     return results
 
-def inspect(repo, *, worktree_branches=None, main_only=False):
+def inspect(repo, *, worktree_branches=None, main_only=False, main_ancestor_sha=None):
     if WorkflowTransport is None or GitHubClient is None:
         return dict(schema='fortis.github.mirror.v1', repoId=repo,
                     head=None, branches={}, pullRequests=None, workflowRuns=None,
@@ -235,7 +278,8 @@ def inspect(repo, *, worktree_branches=None, main_only=False):
                         errors={'scope':'GATEWAY_REPOSITORY_NOT_REGISTERED'},
                         truncated={}, source='fortis-gateway')
         return collect(GitHubClient(gateway=transport), repo,
-                       worktree_branches=worktree_branches, main_only=main_only)
+                       worktree_branches=worktree_branches, main_only=main_only,
+                       main_ancestor_sha=main_ancestor_sha)
     except (Denied, ValueError, KeyError, TypeError, OSError):
         return dict(schema='fortis.github.mirror.v1', repoId=repo,
                     head=None, branches={}, pullRequests=None, workflowRuns=None, checkRuns={},
@@ -247,6 +291,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--main-only', action='store_true')
+    parser.add_argument('--main-ancestor-sha')
     parser.add_argument('--scope-worktrees', action='store_true')
     parser.add_argument('--worktree-branch', action='append', default=[])
     args = parser.parse_args()
@@ -256,11 +301,13 @@ def main():
         any(not re.fullmatch(r'task/[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}', b)
             for b in args.worktree_branch)):
         parser.error('invalid worktree branch')
+    if args.main_ancestor_sha is not None and not SHA.fullmatch(args.main_ancestor_sha):
+        parser.error('invalid main ancestor sha')
     if not NAME.fullmatch(args.repo) or args.repo in ('.', '..'):
         parser.error('invalid repository')
     print(json.dumps(inspect(args.repo,
         worktree_branches=args.worktree_branch if args.scope_worktrees else None,
-        main_only=args.main_only),
+        main_only=args.main_only, main_ancestor_sha=args.main_ancestor_sha),
         separators=(',', ':'), ensure_ascii=True,
                      sort_keys=True))
 

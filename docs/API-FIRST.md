@@ -170,19 +170,33 @@ The owner **«Проверить выбранный»** and **«Проверит
 CSRF-protected `POST /api/v1/repositories/<repo>/check-windows` for one or
 up to four repositories concurrently. For each repo, Docker inventory, Windows
 Git and a **fresh Gateway-verified GitHub `main` branch SHA** are checked.
-If Windows clean `main` differs from that SHA and the registered Docker primary
-is clean and matches GitHub, the owner check performs bounded `git fetch
---no-tags --no-recurse-submodules origin main` in the Windows clone (45 s
-limit, no interactive credentials), proves `FETCH_HEAD` equals the exact
-Gateway SHA, rechecks Windows branch/HEAD/origin/clean, and reads `merge-base`.
+If Windows clean `main` differs from that SHA, the owner check may perform
+bounded `git fetch --no-tags --no-recurse-submodules origin main` in the Windows
+clone (45 s limit, no interactive credentials), **even if Docker main is behind
+GitHub**. This metadata-only observation independently requires the verified
+Windows clone/origin/main/clean state and exact fresh Gateway main; it proves
+`FETCH_HEAD` equals the pinned SHA, rechecks Windows branch/HEAD/origin/clean,
+and reads `merge-base`. **Pull authorization has not been relaxed:** the fresh
+server Preview still requires registered clean Docker main at the exact GitHub
+main SHA, along with all Windows and origin/ancestry guards.
+
+When Docker primary main differs, the fast Gateway reader additionally uses
+bounded typed `list_commits` reads (at most three pages of 50) pinned by the
+first returned SHA to the separately verified GitHub `main`. Finding the exact
+Docker SHA in this reachable history proves `Docker behind`; missing history,
+moving main or an out-of-window commit never proves `ahead` or `diverged`.
+Mirror may also inspect locally present Docker Git objects with read-only
+`merge-base`, without `fetch`, to prove `ahead` or `diverged` where possible.
+The primary row and detail block display proven direction, evidence, and
+specific Windows Pull blockers such as `DOCKER_MAIN_NOT_AT_GITHUB_MAIN`.
 The check can update Git objects/FETCH_HEAD and possibly remote tracking refs,
 **not** Windows HEAD/index/worktree. `fetch` error, timeout, moving remote or
 changed Windows status stays unknown, displays an explicit error and blocks
 Pull until fresh verification. A match needs no fetch; unsafe clones never fetch.
 Normal `GET /api/v1/repositories/<repo>?remote=true` remains read-only for
-callers and Pull post-result refresh. Developer-preview mode denies this POST. The Gateway reader
-calls only typed `list_branches`; it does not fetch closed PR details, PR lists,
-workflow history or check runs. All local SHA, origin, clean, branch and
+callers and Pull post-result refresh. Developer-preview mode denies this POST. The fast Gateway reader calls typed `list_branches` plus bounded
+`list_commits` only for Docker-main discrepancies; it does not fetch closed PR
+details, PR lists, workflow history or check runs. All local SHA, origin, clean, branch and
 ancestry checks, and owner-local Pull fresh Preview, are unchanged. In this
 mode PR and CI fields remain explicitly `UNVERIFIED` / `NOT_VERIFIED`, never
 silently `NONE`, `MERGED` or `SUCCESS`. The route never caches remote SHA.

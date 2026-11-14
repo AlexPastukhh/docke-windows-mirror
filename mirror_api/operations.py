@@ -115,11 +115,11 @@ def windows_status(base, repo_id, expected_origin):
     return result
 
 
-def github_main(repo_id, origin, *, worktree_branches=None, details=True):
+def github_main(repo_id, origin, *, worktree_branches=None, details=True, main_ancestor_sha=None):
     """Typed Gateway-only metadata. Invalid/mismatched origin fails closed."""
     result = dict(source="fortis-gateway", checkedAt=checked_at(), repoId=repo_id,
                   head=None, branches={}, pullRequests=None, workflowRuns=None,
-                  checkRuns={}, readErrors={}, truncated={},
+                  checkRuns={}, readErrors={}, truncated={}, mainHistory=None,
                   requiredCI="NOT_VERIFIED", error=None)
     match = re.fullmatch(
         r"(?:https://github\.com/|git@github\.com:)AlexPastukhh/([A-Za-z0-9_.-]+?)(?:\.git)?",
@@ -127,24 +127,27 @@ def github_main(repo_id, origin, *, worktree_branches=None, details=True):
     if not match or match.group(1).casefold() != repo_id.casefold():
         result["error"] = "ORIGIN_NOT_ALLOWED"
         return result
+    ancestry_options = ({'main_ancestor_sha': main_ancestor_sha}
+                        if main_ancestor_sha is not None else {})
     if not details:
         # Fresh exact main via typed Gateway. PR/CI remain explicitly unknown;
         # no stale cache or guessed merge evidence enters Pull authorization.
-        data = gateway_pr_ci(repo_id, main_only=True)
+        data = gateway_pr_ci(repo_id, main_only=True, **ancestry_options)
     else:
-        data = gateway_pr_ci(repo_id) if worktree_branches is None else gateway_pr_ci(
-            repo_id, worktree_branches=worktree_branches)
+        data = gateway_pr_ci(repo_id, **ancestry_options) if worktree_branches is None else gateway_pr_ci(
+            repo_id, worktree_branches=worktree_branches, **ancestry_options)
     result.update(head=data["head"], branches=data["branches"],
                   pullRequests=data["pullRequests"], workflowRuns=data["workflowRuns"],
                   checkRuns=data["checkRuns"], readErrors=data["errors"],
                   truncated=data["truncated"],
-                  gatewayTimingsMs=data.get("timingsMs"))
+                  gatewayTimingsMs=data.get("timingsMs"),
+                  mainHistory=data.get("mainHistory"))
     if result["head"] is None:
         result["error"] = data["errors"].get("branches", "GATEWAY_MAIN_UNVERIFIED")
     return result
 
 
-def gateway_pr_ci(repo_id, *, worktree_branches=None, main_only=False):
+def gateway_pr_ci(repo_id, *, worktree_branches=None, main_only=False, main_ancestor_sha=None):
     """Run only the typed authenticated Gateway reader inside Fortis Repo.
 
     Windows has no Gateway machine grant and never receives GitHub tokens.
@@ -158,6 +161,10 @@ def gateway_pr_ci(repo_id, *, worktree_branches=None, main_only=False):
             "python3", "-B", GITHUB_READER, "--repo", repo_id]
     if main_only:
         args.append("--main-only")
+    if main_ancestor_sha is not None:
+        if type(main_ancestor_sha) is not str or not SHA.fullmatch(main_ancestor_sha):
+            raise ObservationError("GATEWAY_MAIN_ANCESTOR_INVALID")
+        args.extend(["--main-ancestor-sha", main_ancestor_sha])
     if worktree_branches is not None:
         if (type(worktree_branches) not in (list, tuple) or len(worktree_branches) > 100 or
                 any(type(branch) is not str or not re.fullmatch(r"task/[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}", branch)
@@ -174,6 +181,11 @@ def gateway_pr_ci(repo_id, *, worktree_branches=None, main_only=False):
                 type(data.get("errors")) is not dict or
                 type(data.get("truncated")) is not dict or
                 type(data.get("checkRuns")) is not dict or
+                (data.get("mainHistory") is not None and
+                 (type(data["mainHistory"]) is not dict or
+                  data["mainHistory"].get("head") != data.get("head") or
+                  data["mainHistory"].get("candidate") != main_ancestor_sha or
+                  data["mainHistory"].get("relation") not in ("behind", "unknown"))) or
                 (data.get("pullRequests") is not None and type(data["pullRequests"]) is not list) or
                 (data.get("workflowRuns") is not None and type(data["workflowRuns"]) is not list)):
             raise ValueError()
@@ -266,6 +278,31 @@ def relation_to_sha(path, source, target):
     if base == target:
         return "ahead"
     return "diverged"
+
+
+def docker_relation_to_sha(repo_id, source, target):
+    """Read local Docker Git objects only; never fetch or consult origin/main."""
+    if (not REPO.fullmatch(repo_id) or type(source) is not str or
+            type(target) is not str or not SHA.fullmatch(source) or
+            not SHA.fullmatch(target)):
+        return 'unknown'
+    if source == target:
+        return 'equal'
+    root = '/workspace/repo/Repos/' + repo_id
+    argv = ['docker', 'exec', '-i', '--user', '1000:1000', CONTAINER,
+            'git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+            '-C', root, 'merge-base', source, target]
+    try:
+        base = run(argv, timeout=18)
+    except ObservationError:
+        return 'unknown'
+    if base == source:
+        return 'behind'
+    if base == target:
+        return 'ahead'
+    if SHA.fullmatch(base):
+        return 'diverged'
+    return 'unknown'
 
 
 def fetch_windows_main_history(windows_root, repo_id, expected_origin, expected_head, target_sha):
@@ -409,7 +446,10 @@ class Mirror:
             remote_start = time.perf_counter()
             github = github_main(name, origin,
                 worktree_branches=task_branches if details else None,
-                details=details) if remote else {
+                details=details, main_ancestor_sha=primary.get("head") if
+                    primary.get("branch") == "main" and
+                    type(primary.get("head")) is str and SHA.fullmatch(primary["head"])
+                    else None) if remote else {
                 "source": "github", "checkedAt": None, "repoId": name,
                 "head": None, "branches": {}, "pullRequests": None,
                 "workflowRuns": None, "checkRuns": {}, "readErrors": {"gateway":"NOT_CHECKED"},
@@ -423,9 +463,7 @@ class Mirror:
                 # Guard against missing/mismatched Gateway SHA; no network
                 # when both Windows and GitHub already point at the same HEAD.
                 if (github.get('error') is None and type(github.get('head')) is str and
-                        SHA.fullmatch(github['head']) and primary.get('head') == github['head'] and
-                        primary.get('clean') is True and primary.get('branch') == 'main' and
-                        primary.get('targetEligible') is True and
+                        SHA.fullmatch(github['head']) and
                         windows.get('error') is None and windows.get('originValid') is True and
                         windows.get('branch') == 'main' and windows.get('clean') is True):
                     if windows['head'] == github['head']:
@@ -438,6 +476,27 @@ class Mirror:
                         windows['fetchStatus'] = ('VERIFIED' if windows['fetchError'] is None
                                                   else 'FAILED')
             relation_start = time.perf_counter()
+            docker_relation = 'unknown'
+            docker_evidence = None
+            if (github.get('head') and github.get('error') is None and
+                    primary.get('branch') == 'main' and
+                    type(primary.get('head')) is str and SHA.fullmatch(primary['head'])):
+                if primary['head'] == github['head']:
+                    docker_relation, docker_evidence = 'equal', 'EXACT_SHA'
+                else:
+                    # A successful bounded Gateway list_commits read proves
+                    # reachability of Docker HEAD from the pinned GitHub main.
+                    history = github.get('mainHistory') or {}
+                    if (history.get('head') == github['head'] and
+                            history.get('candidate') == primary['head'] and
+                            history.get('relation') == 'behind'):
+                        docker_relation, docker_evidence = 'behind', 'GATEWAY_MAIN_HISTORY'
+                    else:
+                        docker_relation = docker_relation_to_sha(name, primary['head'], github['head'])
+                        if docker_relation != 'unknown':
+                            docker_evidence = 'DOCKER_GIT_ANCESTRY'
+            primary['remoteRelation'] = docker_relation
+            primary['remoteRelationEvidence'] = docker_evidence
             if (github.get("head") and windows["exists"] and windows["error"] is None and
                     not windows.get('fetchError')):
                 windows["relation"] = relation_to_sha(self.windows_root / name,
@@ -447,8 +506,9 @@ class Mirror:
                 branch = worktree.get("branch")
                 remote_sha = github.get("branches", {}).get(branch)
                 worktree["remoteSha"] = remote_sha
-                worktree["remoteRelation"] = ("equal" if remote_sha == worktree.get("head")
-                    and remote_sha is not None else "unknown")
+                if worktree is not primary:
+                    worktree["remoteRelation"] = ("equal" if remote_sha == worktree.get("head")
+                        and remote_sha is not None else "unknown")
                 worktree["pullRequest"], worktree["ci"] = worktree_pr_ci(worktree, github)
             actions = evaluate_actions(windows, github, docker_primary=primary)
             output["repositories"].append({"repoId": name, "docker": {"primary": primary,

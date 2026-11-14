@@ -182,6 +182,26 @@ function pullEligible(row) {
 }
 
 
+const PULL_BLOCKER_TEXT = {
+  DOCKER_MAIN_NOT_VERIFIED: 'Docker primary main не подтверждён как чистый и зарегистрированный',
+  DOCKER_MAIN_NOT_AT_GITHUB_MAIN: 'Docker main не совпадает с GitHub main; сначала обновите Docker main штатным Gateway workflow',
+  GITHUB_MAIN_UNVERIFIED: 'GitHub main не подтверждён Gateway',
+  WINDOWS_ORIGIN_NOT_VERIFIED: 'Windows origin / Git-клон не подтверждён',
+  WINDOWS_NOT_ON_MAIN: 'Windows не на активной ветке main',
+  WINDOWS_NOT_CLEAN: 'В Windows есть незакоммиченные изменения или состояние не подтверждено',
+  WINDOWS_ALREADY_CURRENT: 'Windows уже находится на актуальном GitHub main',
+  WINDOWS_NOT_BEHIND_GITHUB: 'Windows впереди GitHub или история разошлась',
+  WINDOWS_FETCH_FAILED: 'Не удалось прочитать новые Git-коммиты на Windows',
+  WINDOWS_FETCH_TIMEOUT: 'Windows fetch превысил лимит времени',
+  WINDOWS_FETCHED_MAIN_CHANGED: 'GitHub main изменился во время Windows fetch — повторите проверку',
+};
+function pullBlockers(row) {
+  if (!row || !row.actions || !row.actions.pull_main_browser) return 'Сначала выполните проверку выбранного репозитория';
+  const action = row.actions.pull_main_browser;
+  if (action.available === true) return 'Предварительные условия выполнены; окончательное разрешение только после свежего Preview';
+  if (!Array.isArray(action.reasons) || !action.reasons.length) return 'Причина не подтверждена, повторите проверку';
+  return action.reasons.map(reason => PULL_BLOCKER_TEXT[reason] || ('Проверка не пройдена: ' + reason)).join('; ');
+}
 function dockerGithub(row) {
   const d = primary(row), gh = row.github || {};
   if (!d) return 'НЕТ PRIMARY';
@@ -190,8 +210,12 @@ function dockerGithub(row) {
   if (!sha) return gh.truncated && gh.truncated.branches || gh.readErrors && gh.readErrors.branches ?
     'ВЕТКА НЕ ПОДТВЕРЖДЕНА' : 'НЕТ В GITHUB';
   if (sha === d.head) return 'РАВЕН GITHUB';
-  // Two different SHAs are NOT evidence of ahead/behind without Git ancestry.
-  return 'SHA ≠ GH · НАПРАВЛЕНИЕ НЕИЗВЕСТНО';
+  switch (d.remoteRelation) {
+    case 'behind': return 'ОТСТАЁТ ОТ GITHUB';
+    case 'ahead': return 'ВПЕРЕДИ GITHUB';
+    case 'diverged': return 'ИСТОРИИ РАЗОШЛИСЬ';
+    default: return 'SHA ≠ GH · НАПРАВЛЕНИЕ НЕИЗВЕСТНО';
+  }
 }
 function windowsGithub(row) {
   const w = row.windows || {};
@@ -225,8 +249,17 @@ function overall(row) {
   if (!ghChecked(row)) return ['НЕ ПРОВЕРЕНО', 'Нажать «Проверить выбранный/все»'];
   if (w.relation === 'diverged') return ['WINDOWS: ИСТОРИИ РАЗОШЛИСЬ', 'Не выполнять Pull'];
   if (w.relation === 'ahead') return ['WINDOWS ВПЕРЕДИ', 'Проверить неожиданные Windows-коммиты'];
+  if (dockerGithub(row) !== 'РАВЕН GITHUB') {
+    if (d.remoteRelation === 'behind') return ['DOCKER ОТСТАЁТ',
+      'Сначала обновить Docker main через Gateway; Windows Pull пока заблокирован'];
+    if (d.remoteRelation === 'ahead') return ['DOCKER ВПЕРЕДИ',
+      'Не выполнять Windows Pull; проверить неопубликованные Docker-коммиты'];
+    if (d.remoteRelation === 'diverged') return ['DOCKER: ИСТОРИИ РАЗОШЛИСЬ',
+      'Не выполнять Windows Pull; требуется разбор истории'];
+    return ['DOCKER ≠ GITHUB',
+      'Направление Docker не доказано; Windows Pull заблокирован до синхронизации Docker'];
+  }
   if (w.relation === 'behind') return ['WINDOWS ОТСТАЁТ', 'Нужен guarded Windows main Pull'];
-  if (dockerGithub(row) !== 'РАВЕН GITHUB') return ['DOCKER ≠ GITHUB', 'Сверить Docker main с GitHub main'];
   if (w.relation === 'equal' && w.head === gh.head) return ['АКТУАЛЕН', 'Ничего не требуется'];
   return ['ТРЕБУЕТ ПРОВЕРКИ', 'Направление Git-истории не подтверждено'];
 }
@@ -270,11 +303,13 @@ function rowDetails(row) {
     'Windows local main SHA: ' + (w.branch === 'main' ? show(w.head) : 'НЕ ПОДТВЕРЖДЕН'),
     'Windows main ↔ GitHub: ' + windowsGithub(row),
     'Docker main ↔ GitHub: ' + dockerGithub(row),
+    'Доказательство Docker ↔ GitHub: ' + show(d.remoteRelationEvidence),
     'Обязательный CI: ' + show(gh.requiredCI),
     'Ручной Windows Pull (оценка): ' + (row.actions && row.actions.pull_main_browser &&
       row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
       ' · окончательное решение принимает только свежий серверный Preview',
+    'Почему Windows Pull недоступен: ' + pullBlockers(row),
     'Windows fetch: ' + show(w.fetchStatus) +
       (w.fetchError ? ' · ' + w.fetchError : ''),
     'Время чтения (мс): Docker ' + show(row.readTimingsMs && row.readTimingsMs.dockerInventory) +
@@ -376,6 +411,8 @@ function render() {
   $('check-worktree-details').disabled = !chosen || !!checkController || pullBusy;
   $('pull-windows').disabled = !chosen || !!checkController || pullBusy ||
     !browserPullEnabled || !!lastPullReceipt || !pullEligible(chosen);
+  $('pull-windows').title = !browserPullEnabled ? 'Локальный Windows Pull не настроен' :
+    lastPullReceipt ? 'Сначала проверьте результат предыдущего Pull' : pullBlockers(chosen);
 }
 function renderWorktrees(row) {
   const body = $('worktree-rows'); body.replaceChildren();
