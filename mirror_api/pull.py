@@ -36,7 +36,14 @@ class PullWorker:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.repo_locks = {}
         self._initialize()
+
+    def _repo_lock(self, repo):
+        # Clone-specific serialization: independent Windows primaries can Pull
+        # simultaneously, while the same primary is never executed twice.
+        with self.lock:
+            return self.repo_locks.setdefault(repo, threading.Lock())
 
     def _db(self):
         db = sqlite3.connect(str(self.path), timeout=15)
@@ -99,7 +106,7 @@ class PullWorker:
         if value["repoId"] != repo_id or repo_id not in allowed_repos:
             raise PullDenied("REPOSITORY_NOT_ALLOWED")
         frozen = json.dumps(value, sort_keys=True, separators=(",", ":"))
-        with self.lock:
+        with self._repo_lock(repo_id):
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 # Reservation is durable before touching Git. Any repeated request

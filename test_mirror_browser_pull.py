@@ -178,6 +178,35 @@ class BrowserPullUnitTests(unittest.TestCase):
         self.assertTrue(all(type(timings[k]) is int and timings[k]>=0 for k in timings))
         self.assertTrue(self.pull.worker.path.exists())
 
+    def test_different_clones_can_execute_with_independent_worker_locks(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from mirror_api.pull import PullWorker
+        import uuid
+        worker=PullWorker(self.mirror, Path(self.tmp.name)/'parallel.sqlite')
+        rendezvous=threading.Barrier(2,timeout=3)
+        def fake_run(payload, *, timings):
+            rendezvous.wait()
+            timings['gatewayMain']=1
+            return {'requestId':payload['requestId'],'state':'EXECUTED',
+                    'head':NEW,'checkedAt':'now'}
+        def run(repo):
+            request_id=str(uuid.uuid4())
+            return worker.run({'requestId':request_id,'repoId':repo,
+                               'expectedHead':OLD,'targetSha':NEW,
+                               'origin':ORIGIN},repo_id=repo,
+                              allowed_repos=frozenset({'sample','other'}))
+        with mock.patch.object(worker,'_execute',side_effect=fake_run), \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            first=pool.submit(run,'sample')
+            second=pool.submit(run,'other')
+            result1=first.result(timeout=5)
+            result2=second.result(timeout=5)
+        self.assertEqual('EXECUTED',result1['state'])
+        self.assertEqual('EXECUTED',result2['state'])
+        self.assertEqual(1,result1['timingsMs']['gatewayMain'])
+        self.assertEqual(1,result2['timingsMs']['gatewayMain'])
+        self.assertNotEqual(result1['requestId'],result2['requestId'])
+
     def test_gateway_main_mismatch_still_prevents_windows_git_and_is_measured(self):
         preview=self.pull.preview('sample','one')
         docker=[{'kind':'primary','branch':'main','head':NEW,'clean':True,
@@ -336,6 +365,48 @@ class BrowserPullHttpTests(unittest.TestCase):
         self.assertEqual(200,code)
         self.assertEqual(['sample'],self.mirror.checks)
         self.assertEqual([(True,'sample')],self.mirror.calls)
+
+    def test_same_clone_check_and_pull_execute_are_serialized_different_clones_are_not(self):
+        """A client-side Abort cannot bypass server's per-clone Git guard."""
+        from concurrent.futures import ThreadPoolExecutor
+        entered = threading.Event()
+        release = threading.Event()
+        real = self.mirror.check_repository
+        def slow_check(repo):
+            if repo == 'sample':
+                entered.set()
+                if not release.wait(timeout=4):
+                    raise RuntimeError('Fixture check was not released')
+            return real(repo)
+        self.login()
+        with mock.patch.object(self.mirror, 'check_repository', side_effect=slow_check), \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(self.post,'check-windows')
+            try:
+                self.assertTrue(entered.wait(timeout=2))
+                worker = self.server.browser_pull._worker()
+                self.assertFalse(worker._repo_lock('sample').acquire(blocking=False),
+                    'Same-clone Gateway worker is fenced while Check has fetched metadata')
+                self.assertTrue(worker._repo_lock('another').acquire(blocking=False),
+                    'Unrelated clone lock remains available')
+                worker._repo_lock('another').release()
+                code, data, _ = self.post('check-windows')
+                self.assertEqual(409,code)
+                self.assertEqual('REPOSITORY_OPERATION_PENDING',data['error'])
+                code, data, _ = self.post('pull-execute','{"previewId":"x","confirm":"PULL_WINDOWS_MAIN"}')
+                self.assertEqual(409,code)
+                self.assertEqual('REPOSITORY_OPERATION_PENDING',data['error'])
+                # Other clone is not blocked by this lock; fixture does not
+                # register it, so the expected outcome is a different denial.
+                code, data, _ = self.post('check-windows',repo='another')
+                self.assertEqual(409,code)
+                self.assertEqual('DOCKER_REPOSITORY_NOT_REGISTERED',data['error'])
+            finally:
+                release.set()
+            code, _, _ = pending.result(timeout=3)
+            self.assertEqual(200,code)
+        code, _, _ = self.post('check-windows')
+        self.assertEqual(200,code,'Server releases the clone guard on completion')
 
     def test_owner_check_is_forbidden_in_read_only_preview_and_without_worker(self):
         self.login()
