@@ -75,6 +75,7 @@ const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: fa
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
 let clipboard = null;
 let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
+let denyGatewayRead = false;
 const requests = [], requestOptions = [];
 const fetch = async (url, options = {}) => {
   requests.push(url); requestOptions.push(options);
@@ -124,9 +125,16 @@ const fetch = async (url, options = {}) => {
     assert.equal(options.body, '{}', 'No caller-supplied ref/URL/command');
     if (failRemoteOnce) {failRemoteOnce = false; throw Error('Simulated Git metadata fetch failure');}
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'/check-windows'.length));
-    return {ok: true, json: async () => ({checkedAt:'2026-11-09T12:00:00Z', repository:
-      fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
-      'updated-task', {checked:true, relation:'equal'})})};
+    const row = fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
+                        'updated-task', {checked:true, relation:'equal'});
+    if (denyGatewayRead && name === 'fortis-approvals') {
+      row.github.head = null; row.github.branches = {};
+      row.github.error = 'GATEWAY_HTTP_403';
+      row.github.readErrors = {branches: 'GATEWAY_HTTP_403'};
+      row.github.githubRepository = 'fortis-approvals';
+      row.actions.pull_main_browser = {available: false, reasons: ['GITHUB_MAIN_UNVERIFIED']};
+    }
+    return {ok: true, json: async () => ({checkedAt:'2026-11-09T12:00:00Z', repository: row})};
   }
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
@@ -269,7 +277,22 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.match(elements['row-full'].textContent, /Почему Windows Pull недоступен: Docker main не совпадает/);
   assert.equal(elements['pull-windows'].disabled, true);
   assert.match(elements['pull-windows'].title, /сначала обновите Docker main/);
-  await elements['selected-remote'].onclick(); // Next owner check replaces stale test fixture.
+  // Successful HTTP/API response with a denied GitHub read is NOT a successful check.
+  denyGatewayRead = true;
+  await elements['selected-remote'].onclick();
+  assert.match(elements['banner'].textContent, /GitHub не подтверждён: 1/);
+  assert.match(elements['banner'].textContent, /ошибок запросов: 0/);
+  assert.equal(elements['primary-rows'].children[1].children[3].textContent, 'GATEWAY: HTTP 403');
+  assert.match(elements['row-full'].textContent, /Код ошибки GitHub: GATEWAY_HTTP_403/);
+  assert.match(elements['row-full'].textContent, /GitHub репозиторий из Docker origin: fortis-approvals/);
+  assert.equal(elements['pull-windows'].disabled, true);
+  const denied = vm.runInContext("rows.find(row => row.repoId === 'fortis-approvals')", sandbox);
+  denied.github.error = 'ORIGIN_MISSING'; denied.github.githubRepository = null;
+  vm.runInContext('render()', sandbox);
+  assert.equal(elements['primary-rows'].children[1].children[3].textContent, 'НЕТ ORIGIN');
+  assert.match(elements['row-full'].textContent, /Код ошибки GitHub: ORIGIN_MISSING/);
+  denyGatewayRead = false;
+  await elements['selected-remote'].onclick(); // Fresh valid check replaces the diagnostic fixture.
   const beforeAll = requests.filter(url => url.endsWith('/check-windows')).length;
   await elements['remote'].onclick();
   const allRequests = requests.filter(url => url.endsWith('/check-windows')).slice(beforeAll);

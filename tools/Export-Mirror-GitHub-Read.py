@@ -42,6 +42,14 @@ MAX_MAIN_HISTORY_PAGES = 3
 MAX_MAIN_HISTORY_PAGE_SIZE = 50
 
 
+def read_error(error, generic):
+    """Expose a bounded Gateway HTTP status, never raw provider messages."""
+    if isinstance(error, Denied) and str(error) in (
+            'FORTIS_HTTP_403', 'FORTIS_HTTP_404', 'FORTIS_HTTP_429', 'FORTIS_HTTP_500'):
+        return 'GATEWAY_HTTP_' + str(error)[-3:]
+    return generic
+
+
 def pages(fetch):
     items = []
     for page in range(1, MAX_PAGES + 1):
@@ -157,8 +165,8 @@ def collect(client, repo, *, worktree_branches=None, main_only=False, main_ances
                 results['truncated']['branches'] = True
             if results['head'] is None:
                 results['errors']['branches'] = 'GATEWAY_MAIN_UNVERIFIED'
-        except (Denied, ValueError, TypeError, KeyError):
-            results['errors']['branches'] = 'GATEWAY_BRANCH_READ_UNAVAILABLE'
+        except (Denied, ValueError, TypeError, KeyError) as exc:
+            results['errors']['branches'] = read_error(exc, 'GATEWAY_BRANCH_READ_UNAVAILABLE')
         attach_main_history()
         timings['total'] = round((time.monotonic() - started) * 1000)
         results['timingsMs'] = timings
@@ -178,8 +186,8 @@ def collect(client, repo, *, worktree_branches=None, main_only=False, main_ances
                 results['truncated']['branches'] = True
             if results['head'] is None:
                 results['errors']['branches'] = 'GATEWAY_MAIN_UNVERIFIED'
-        except (Denied, ValueError, TypeError, KeyError):
-            results['errors']['branches'] = 'GATEWAY_BRANCH_READ_UNAVAILABLE'
+        except (Denied, ValueError, TypeError, KeyError) as exc:
+            results['errors']['branches'] = read_error(exc, 'GATEWAY_BRANCH_READ_UNAVAILABLE')
         try:
             (pulls, limited), timings['pullRequests'] = pulls_job.result()
             results['truncated']['pullRequests'] = limited
@@ -280,10 +288,10 @@ def inspect(repo, *, worktree_branches=None, main_only=False, main_ancestor_sha=
         return collect(GitHubClient(gateway=transport), repo,
                        worktree_branches=worktree_branches, main_only=main_only,
                        main_ancestor_sha=main_ancestor_sha)
-    except (Denied, ValueError, KeyError, TypeError, OSError):
+    except (Denied, ValueError, KeyError, TypeError, OSError) as exc:
         return dict(schema='fortis.github.mirror.v1', repoId=repo,
                     head=None, branches={}, pullRequests=None, workflowRuns=None, checkRuns={},
-                    errors={'gateway':'GATEWAY_READ_UNAVAILABLE'},
+                    errors={'gateway': read_error(exc, 'GATEWAY_READ_UNAVAILABLE')},
                     truncated={}, source='fortis-gateway')
 
 

@@ -32,6 +32,23 @@ const known = value => value !== null && value !== undefined && value !== '';
 const show = value => known(value) ? String(value) : '—';
 const short = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 8) : '—';
 const ghChecked = row => Boolean(!row.remoteCheckError && row.github && row.github.head && !row.github.error);
+const GITHUB_FAILURE_LABELS = {
+  ORIGIN_MISSING: 'НЕТ ORIGIN',
+  ORIGIN_NOT_ALLOWED: 'ORIGIN НЕ РАЗРЕШЁН',
+  GATEWAY_HTTP_403: 'GATEWAY: HTTP 403',
+  GATEWAY_HTTP_404: 'GATEWAY: HTTP 404',
+  GATEWAY_HTTP_429: 'GATEWAY: HTTP 429',
+  GATEWAY_HTTP_500: 'GATEWAY: HTTP 500',
+  GATEWAY_BRANCH_READ_UNAVAILABLE: 'ОШИБКА ЧТЕНИЯ GATEWAY',
+  GATEWAY_READ_UNAVAILABLE: 'GATEWAY НЕДОСТУПЕН',
+  GATEWAY_MAIN_UNVERIFIED: 'GITHUB MAIN НЕ ПОДТВЕРЖДЁН',
+  GATEWAY_REPOSITORY_NOT_REGISTERED: 'GATEWAY: НЕТ ДОСТУПА К РЕПОЗИТОРИЮ'
+};
+function githubFailure(row) {
+  if (row.remoteCheckError) return 'ОШИБКА ПРОВЕРКИ';
+  const code = row.github && row.github.error;
+  return code && code !== 'NOT_CHECKED' ? (GITHUB_FAILURE_LABELS[code] || code) : null;
+}
 const primary = row => row.docker && row.docker.primary || null;
 const changedLabel = count => count === null || count === undefined ? 'НЕ ПРОВЕРЕНО' :
   count === 0 ? 'Нет' : 'Есть: ' + count;
@@ -205,7 +222,7 @@ function pullBlockers(row) {
 function dockerGithub(row) {
   const d = primary(row), gh = row.github || {};
   if (!d) return 'НЕТ PRIMARY';
-  if (!ghChecked(row)) return 'НЕ ПРОВЕРЕН';
+  if (!ghChecked(row)) return githubFailure(row) || 'НЕ ПРОВЕРЕН';
   const sha = gh.branches && gh.branches[d.branch];
   if (!sha) return gh.truncated && gh.truncated.branches || gh.readErrors && gh.readErrors.branches ?
     'ВЕТКА НЕ ПОДТВЕРЖДЕНА' : 'НЕТ В GITHUB';
@@ -222,7 +239,7 @@ function windowsGithub(row) {
   if (!w.exists) return w.error === 'WINDOWS_CLONE_NOT_FOUND' ? 'НЕТ КЛОНА' : 'НЕ ПРОВЕРЕН';
   if (w.error || !w.originValid) return 'ОШИБКА ORIGIN / GIT';
   if (w.fetchError) return 'ОШИБКА FETCH · ' + w.fetchError;
-  if (!ghChecked(row)) return 'НЕ ПРОВЕРЕН';
+  if (!ghChecked(row)) return githubFailure(row) || 'НЕ ПРОВЕРЕН';
   if (w.branch !== 'main') return 'WINDOWS: НЕ MAIN';
   switch (w.relation) {
     case 'equal': return 'АКТУАЛЕН К GITHUB';
@@ -246,7 +263,12 @@ function overall(row) {
   if (w.clean === false) return ['WINDOWS: ИЗМЕНЕНИЯ', 'Разобрать Windows-файлы; Pull запрещён'];
   if (w.clean !== true) return ['WINDOWS: НЕ ПРОВЕРЕН', 'Проверить git status Windows'];
   if (row.remoteCheckError) return ['ОШИБКА ПРОВЕРКИ', 'GitHub не проверен: ' + row.remoteCheckError];
-  if (!ghChecked(row)) return ['НЕ ПРОВЕРЕНО', 'Нажать «Проверить выбранный/все»'];
+  if (!ghChecked(row)) {
+    const failure = githubFailure(row);
+    return failure ? ['GITHUB: ' + failure, 'Чтение GitHub main не подтверждено: ' +
+      show(gh.error || row.remoteCheckError)] :
+      ['НЕ ПРОВЕРЕНО', 'Нажать «Проверить выбранный/все»'];
+  }
   if (w.relation === 'diverged') return ['WINDOWS: ИСТОРИИ РАЗОШЛИСЬ', 'Не выполнять Pull'];
   if (w.relation === 'ahead') return ['WINDOWS ВПЕРЕДИ', 'Проверить неожиданные Windows-коммиты'];
   if (dockerGithub(row) !== 'РАВЕН GITHUB') {
@@ -278,7 +300,7 @@ function rowFields(row, full = false) {
 }
 function tone(value) {
   if (value === 'АКТУАЛЕН' || value === 'РАВЕН GITHUB' || value === 'АКТУАЛЕН К GITHUB') return 'good';
-  if (/ОШИБКА|ИЗМЕНЕНИЯ|РАЗОШЛИСЬ|ВПЕРЕДИ|НЕТ PRIMARY/.test(value)) return 'bad';
+  if (/ОШИБКА|ИЗМЕНЕНИЯ|РАЗОШЛИСЬ|ВПЕРЕДИ|НЕТ PRIMARY|HTTP 403|HTTP 404|ORIGIN НЕ РАЗРЕШЁН/.test(value)) return 'bad';
   if (/НЕ ПРОВЕРЕН|НЕТ КЛОНА|НЕИЗВЕСТНО/.test(value)) return 'muted';
   return 'warn';
 }
@@ -293,6 +315,7 @@ function rowDetails(row) {
   text.push('', 'ДОПОЛНИТЕЛЬНЫЕ СВЕДЕНИЯ ПОСЛЕ КОЛОНОК',
     'Docker primary: ' + show(d.path), 'Windows primary: ' + show(w.path || ('%USERPROFILE%\\Repos\\' + row.repoId)),
     'Docker origin: ' + show(d.origin), 'Windows origin: ' + show(w.origin),
+    'GitHub репозиторий из Docker origin: ' + show(gh.githubRepository),
     'Windows origin подтверждён: ' + (w.originValid === true ? 'Да' : 'Нет'),
     'Docker worktree status: ' + show(d.status),
     'Docker primary: ' + (d.clean === true ? 'CLEAN' : d.clean === false ? 'DIRTY' : 'НЕ ПРОВЕРЕНО'),
@@ -320,7 +343,8 @@ function rowDetails(row) {
     'Gateway этапы (мс): ' + (gh.gatewayTimingsMs ? JSON.stringify(gh.gatewayTimingsMs) : 'НЕ ПРОВЕРЕНЫ'),
     'Локальная проверка Windows: ' + show(w.checkedAt),
     'Проверка GitHub: ' + (row.remoteCheckError ? 'ОШИБКА: ' + row.remoteCheckError :
-      ghChecked(row) ? show(row.remoteCheckedAt || gh.checkedAt) : 'НЕ ПРОВЕРЕН'),
+      ghChecked(row) ? show(row.remoteCheckedAt || gh.checkedAt) : githubFailure(row) || 'НЕ ПРОВЕРЕН'),
+    'Код ошибки GitHub: ' + show(gh.error),
     'Gateway read errors: ' + (gh.readErrors && Object.keys(gh.readErrors).length ?
       Object.entries(gh.readErrors).map(([key, value]) => key + '=' + value).join('; ') : 'Нет / не получены'),
     '', 'ИЗМЕНЁННЫЕ ФАЙЛЫ DOCKER PRIMARY (git status)',
@@ -502,7 +526,9 @@ async function checkRemote(all, details = false) {
   checkController = new AbortController();
   const signal = checkController.signal;
   setBusy(true);
-  let index = 0, completed = 0, errors = 0;
+  let index = 0, completed = 0, githubUnverified = 0, windowsFetchErrors = 0, requestErrors = 0;
+  const checkSummary = () => 'GitHub не подтверждён: ' + githubUnverified +
+    ', ошибок Windows fetch: ' + windowsFetchErrors + ', ошибок запросов: ' + requestErrors;
   const started = Date.now();
   $('banner').textContent = 'Проверяю ' + (details ? 'PR/CI' : 'GitHub main + Windows fetch') + ': 0 из ' + names.length;
   const worker = async (csrf) => {
@@ -519,7 +545,8 @@ async function checkRemote(all, details = false) {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
         const at = rows.findIndex(row => row.repoId === name);
-        if (!details && data.repository.windows && data.repository.windows.fetchError) errors++;
+        if (!ghChecked(data.repository)) githubUnverified++;
+        if (!details && data.repository.windows && data.repository.windows.fetchError) windowsFetchErrors++;
         if (at >= 0) {
           data.repository.remoteCheckedAt = data.checkedAt;
           data.repository.worktreeCheckedAt = details ? data.checkedAt : null;
@@ -529,7 +556,8 @@ async function checkRemote(all, details = false) {
         }
       } catch (error) {
         if (!signal.aborted) {
-          errors++;
+          requestErrors++;
+          githubUnverified++;
           const at = rows.findIndex(row => row.repoId === name);
           if (at >= 0) {
             rows[at].remoteCheckError = 'Проверка GitHub / Windows fetch не выполнена';
@@ -540,7 +568,7 @@ async function checkRemote(all, details = false) {
         if (!signal.aborted) {
           completed++;
           $('banner').textContent = 'Проверено ' + completed + ' из ' + names.length +
-            ', ошибок проверки ' + errors + ' · ' + name +
+            ' · ' + checkSummary() + ' · ' + name +
             ' · ' + ((Date.now() - started) / 1000).toFixed(1) + ' с';
         }
       }
@@ -555,7 +583,7 @@ async function checkRemote(all, details = false) {
       () => worker(csrf)));
     $('banner').textContent = signal.aborted ?
       'Проверка отменена; обработанные строки и сведения сохранены.' :
-      'Проверка завершена: ' + completed + ' из ' + names.length + ', ошибок проверки ' + errors +
+      'Проверка завершена: ' + completed + ' из ' + names.length + ' · ' + checkSummary() +
         ', время ' + ((Date.now() - started) / 1000).toFixed(1) + ' с. Отдельные ошибки в нижнем блоке.';
   } catch (error) {
     if (!signal.aborted) {

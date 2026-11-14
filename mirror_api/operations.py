@@ -116,26 +116,36 @@ def windows_status(base, repo_id, expected_origin):
 
 
 def github_main(repo_id, origin, *, worktree_branches=None, details=True, main_ancestor_sha=None):
-    """Typed Gateway-only metadata. Invalid/mismatched origin fails closed."""
+    """Read the pinned owner-owned GitHub origin of a Docker primary.
+
+    Repo ID is the registered local folder, NOT necessarily the GitHub slug.
+    The remote identity comes only from Docker's actual origin, never a URL or
+    repository supplied by the browser. Windows must match that exact origin.
+    """
     result = dict(source="fortis-gateway", checkedAt=checked_at(), repoId=repo_id,
-                  head=None, branches={}, pullRequests=None, workflowRuns=None,
-                  checkRuns={}, readErrors={}, truncated={}, mainHistory=None,
-                  requiredCI="NOT_VERIFIED", error=None)
+                  githubRepository=None, head=None, branches={}, pullRequests=None,
+                  workflowRuns=None, checkRuns={}, readErrors={}, truncated={},
+                  mainHistory=None, requiredCI="NOT_VERIFIED", error=None)
+    if not origin:
+        result["error"] = "ORIGIN_MISSING"
+        return result
     match = re.fullmatch(
         r"(?:https://github\.com/|git@github\.com:)AlexPastukhh/([A-Za-z0-9_.-]+?)(?:\.git)?",
-        origin or "", re.I)
-    if not match or match.group(1).casefold() != repo_id.casefold():
+        origin if type(origin) is str else "", re.I)
+    if not match or not REPO.fullmatch(match.group(1)) or match.group(1) in ('.', '..'):
         result["error"] = "ORIGIN_NOT_ALLOWED"
         return result
+    github_repo = match.group(1)
+    result["githubRepository"] = github_repo
     ancestry_options = ({'main_ancestor_sha': main_ancestor_sha}
                         if main_ancestor_sha is not None else {})
     if not details:
         # Fresh exact main via typed Gateway. PR/CI remain explicitly unknown;
         # no stale cache or guessed merge evidence enters Pull authorization.
-        data = gateway_pr_ci(repo_id, main_only=True, **ancestry_options)
+        data = gateway_pr_ci(github_repo, main_only=True, **ancestry_options)
     else:
-        data = gateway_pr_ci(repo_id, **ancestry_options) if worktree_branches is None else gateway_pr_ci(
-            repo_id, worktree_branches=worktree_branches, **ancestry_options)
+        data = gateway_pr_ci(github_repo, **ancestry_options) if worktree_branches is None else gateway_pr_ci(
+            github_repo, worktree_branches=worktree_branches, **ancestry_options)
     result.update(head=data["head"], branches=data["branches"],
                   pullRequests=data["pullRequests"], workflowRuns=data["workflowRuns"],
                   checkRuns=data["checkRuns"], readErrors=data["errors"],
@@ -143,7 +153,8 @@ def github_main(repo_id, origin, *, worktree_branches=None, details=True, main_a
                   gatewayTimingsMs=data.get("timingsMs"),
                   mainHistory=data.get("mainHistory"))
     if result["head"] is None:
-        result["error"] = data["errors"].get("branches", "GATEWAY_MAIN_UNVERIFIED")
+        result["error"] = next((data["errors"][key] for key in ("branches", "scope", "gateway")
+                                if key in data["errors"]), "GATEWAY_MAIN_UNVERIFIED")
     return result
 
 
