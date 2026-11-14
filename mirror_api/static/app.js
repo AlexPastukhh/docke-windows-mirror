@@ -634,17 +634,43 @@ async function refreshRepository(repo) {
     render();
   }
 }
-async function reconcilePullResult(saved) {
+// Timings come from the local server's monotonic stage clocks, not Git output.
+// Treat them as diagnostics; never use them to approve or repeat a Git effect.
+const PULL_TIMING_LABELS = [
+  ['previewTotal', 'Preview сервер'], ['previewDocker', 'Preview Docker'],
+  ['previewWindows', 'Preview Windows'], ['previewGateway', 'Preview Gateway'],
+  ['dockerInventory', 'Execute Docker'], ['windowsPreflight', 'Windows до fetch'],
+  ['gatewayMain', 'Execute Gateway main'], ['windowsFetch', 'Windows fetch'],
+  ['fetchHeadRead', 'Проверка FETCH_HEAD'], ['windowsAfterFetch', 'Windows после fetch'],
+  ['gitAncestry', 'Проверка fast-forward'], ['fastForward', 'Git merge --ff-only'],
+  ['windowsReadback', 'Итоговая проверка Windows'], ['executeTotal', 'Execute сервер']
+];
+function pullTimingSummary(previewTimings, receiptTimings, elapsed) {
+  const values = {...(previewTimings || {}), ...(receiptTimings || {})};
+  const parts = [];
+  for (const [name, label] of PULL_TIMING_LABELS) {
+    const ms = values[name];
+    if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 && ms <= 600000)
+      parts.push(label + ': ' + ms + ' мс');
+  }
+  if (typeof elapsed === 'number' && Number.isFinite(elapsed) && elapsed >= 0)
+    parts.unshift('От нажатия до подтверждения: ' + elapsed + ' мс');
+  return parts.length ? '\nВремя Pull (этапы перекрываются с общим): ' + parts.join(' · ') : '';
+}
+async function reconcilePullResult(saved, {previewTimings = null, startedAt = null} = {}) {
   const receipt = await readPullReceipt(saved.repo, saved.requestId);
   if (receipt.state === 'EXECUTED' && receipt.head === saved.targetSha) {
     clearPendingPull();
-    showPullResult('Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
-      '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.');
-    try { await refreshRepository(saved.repo); }
-    catch (error) {
-      showPullResult('Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
-        '. Обновление таблицы не удалось; нажмите «Проверить выбранный». Request ID: ' + saved.requestId);
-    }
+    const confirmed = 'Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
+      '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.' +
+      pullTimingSummary(previewTimings, receipt.timingsMs,
+        startedAt === null ? null : Date.now() - startedAt);
+    showPullResult(confirmed);
+    // The receipt has already proven success. A fresh, read-only table refresh
+    // may take seconds through Gateway; it must not keep Pull "in progress".
+    refreshRepository(saved.repo).catch(() => {
+      showPullResult(confirmed + ' Обновление таблицы не удалось; нажмите «Проверить выбранный».');
+    });
     return true;
   }
   showPullResult(receiptMessage(receipt));
@@ -665,6 +691,8 @@ async function verifyPullResult() {
 async function pullWindows() {
   if (!browserPullEnabled || !active || checkController || pullBusy || lastPullReceipt) return;
   const repo = active;
+  const startedAt = Date.now();
+  let previewTimings = null;
   pullBusy = true;
   setBusy(true);
   showPullResult('Проверка Windows main и GitHub main для ' + repo + '…');
@@ -676,6 +704,7 @@ async function pullWindows() {
     const preview = await jsonResponse(await fetch(prefix + '/pull-preview', {
       method: 'POST', headers, body: '{}', cache: 'no-store'
     }));
+    previewTimings = preview.timingsMs || null;
     if (!preview.available) {
       showPullResult('Pull Windows main недоступен для ' + repo + ': ' +
         (preview.reasons || []).join(', ') + '. Git не изменён.');
@@ -696,12 +725,14 @@ async function pullWindows() {
       cache: 'no-store'
     }));
     if (receipt.state === 'EXECUTED' && receipt.head === preview.targetSha) {
-      await reconcilePullResult({repo, requestId, targetSha: preview.targetSha});
+      await reconcilePullResult({repo, requestId, targetSha: preview.targetSha},
+        {previewTimings, startedAt});
     } else {
       showPullResult(receiptMessage(receipt));
       // One immediate read-only reconciliation avoids the manual F12 workflow.
       // A still-uncertain result retains a visible button for the owner.
-      try { await reconcilePullResult({repo, requestId, targetSha: preview.targetSha}); }
+      try { await reconcilePullResult({repo, requestId, targetSha: preview.targetSha},
+        {previewTimings, startedAt}); }
       catch (error) {
         showPullResult(receiptMessage(receipt) + ' Проверка receipt недоступна: ' + error.message);
       }
@@ -712,7 +743,7 @@ async function pullWindows() {
       try {
         const result = await readPullReceipt(repo, requestId);
         if (result.state === 'EXECUTED' && result.head === lastPullReceipt.targetSha) {
-          await reconcilePullResult(lastPullReceipt);
+          await reconcilePullResult(lastPullReceipt, {previewTimings, startedAt});
           return;
         }
         observed = '. ' + receiptMessage(result);

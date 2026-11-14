@@ -76,6 +76,7 @@ const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: fal
 let clipboard = null;
 let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
 let denyGatewayRead = false;
+let deferRefresh = false, releaseRefresh = null;
 const requests = [], requestOptions = [];
 const fetch = async (url, options = {}) => {
   requests.push(url); requestOptions.push(options);
@@ -88,7 +89,8 @@ const fetch = async (url, options = {}) => {
     origin: 'https://github.com/AlexPastukhh/fortis-approvals.git',
     fastForward: 'TO_BE_VERIFIED_AFTER_FETCH', requiredCI: 'NOT_VERIFIED',
     previewId: '12345678-1234-4234-8234-123456789abc',
-    requestId: '22345678-1234-4234-8234-123456789abc', reasons: []
+    requestId: '22345678-1234-4234-8234-123456789abc', reasons: [],
+    timingsMs: {previewTotal: 150, previewGateway: 90}
   })};
   if (url.endsWith('/pull-execute')) {
     assert.equal(options.method, 'POST');
@@ -99,7 +101,8 @@ const fetch = async (url, options = {}) => {
       state: 'UNCERTAIN', head: null, error: 'WINDOWS_READBACK_UNCONFIRMED',
       readbackIssues: ['WORKTREE_NOT_CLEAN'], requestId: '22345678-1234-4234-8234-123456789abc'
     } : {state: 'EXECUTED', head: sha('d'),
-      requestId: '22345678-1234-4234-8234-123456789abc'}};
+      requestId: '22345678-1234-4234-8234-123456789abc',
+      timingsMs: {gatewayMain: 200, windowsFetch: 350, fastForward: 4, executeTotal: 650}}};
   }
   if (url.includes('/pull-results/')) {
     uncertainReads++;
@@ -108,7 +111,8 @@ const fetch = async (url, options = {}) => {
       head: uncertainMode && uncertainReads < 2 ? null : sha('d'),
       error: uncertainMode && uncertainReads < 2 ? 'WINDOWS_READBACK_UNCONFIRMED' : undefined,
       readbackIssues: uncertainMode && uncertainReads < 2 ? ['WORKTREE_NOT_CLEAN'] : [],
-      requestId: '22345678-1234-4234-8234-123456789abc'
+      requestId: '22345678-1234-4234-8234-123456789abc',
+      timingsMs: {gatewayMain: 200, windowsFetch: 350, fastForward: 4, executeTotal: 650}
     })};
   }
   if (url === '/api/v1/repositories') return {ok: true, json: async () => ({
@@ -138,6 +142,8 @@ const fetch = async (url, options = {}) => {
   }
   if (url.startsWith('/api/v1/repositories/') && url.endsWith('?remote=true')) {
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
+    if (deferRefresh && name === 'fortis-approvals')
+      await new Promise(resolve => {releaseRefresh = resolve;});
     return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
       'updated-task', {checked: true, relation: 'equal'})})};
   }
@@ -317,7 +323,17 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   await elements['selected-remote'].onclick();
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
   assert.equal(elements['pull-windows'].disabled, false, 'Manual Pull is enabled on selected row');
+  deferRefresh = true; // Slow Gateway table-read must not block confirmed Pull.
   await elements['pull-windows'].onclick();
+  assert.equal(typeof releaseRefresh, 'function', 'Success schedules a separate table refresh');
+  assert.match(elements['pull-result'].textContent, /Время Pull/);
+  assert.match(elements['pull-result'].textContent, /Execute Gateway main: 200 мс/);
+  assert.match(elements['pull-result'].textContent, /Windows fetch: 350 мс/);
+  assert.match(elements['pull-result'].textContent, /Git merge --ff-only: 4 мс/);
+  assert.equal(elements['receipt-controls'].hidden, true, 'Success is confirmed before table refresh');
+  deferRefresh = false;
+  releaseRefresh();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, 1,
     'Explicit owner approval triggers exactly one Execute');
   assert.match(elements['pull-result'].textContent, /Windows Pull подтверждён/);
