@@ -142,6 +142,96 @@ class BrowserPullUnitTests(unittest.TestCase):
                 self.pull.execute('sample', 'one', preview['previewId'], 'PULL_WINDOWS_MAIN')
         ex.assert_called_once()
 
+    def test_execute_scopes_docker_fast_main_only_and_persists_phase_timings(self):
+        """Guarded Pull uses no PR/CI fanout or whole-workspace Docker walk."""
+        import types
+        preview = self.pull.preview('sample', 'one')
+        docker = [{'kind': 'primary', 'branch': 'main', 'head': NEW,
+                   'clean': True, 'origin': ORIGIN, 'targetEligible': True}]
+        current = {'error': None, 'branch': 'main', 'clean': True,
+                   'head': OLD, 'originValid': True}
+        with mock.patch('mirror_api.pull.docker_inventory',return_value={'sample':docker}) as inventory, \
+             mock.patch('mirror_api.pull.windows_status',return_value=current) as win, \
+             mock.patch('mirror_api.pull.github_main',return_value={'head':NEW,'error':None}) as gh, \
+             mock.patch('mirror_api.pull.git',return_value=NEW) as git_read, \
+             mock.patch('mirror_api.pull.subprocess.run',return_value=types.SimpleNamespace(returncode=0)) as git_run, \
+             mock.patch.object(self.pull.worker, '_confirmed_readback') as readback:
+            receipt = self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
+        self.assertEqual('EXECUTED',receipt['state'])
+        self.assertEqual(NEW,receipt['head'])
+        self.assertEqual(receipt,self.pull.status('sample','one',preview['requestId']),
+                         'The same durable receipt exposes the timings read-only')
+        inventory.assert_called_once_with('sample')
+        self.assertEqual(2,win.call_count,'Windows preflight and post-fetch must remain')
+        gh.assert_called_once_with('sample',ORIGIN,details=False)
+        git_read.assert_called_once()
+        readback.assert_called_once_with('sample',ORIGIN,NEW)
+        self.assertEqual(3,git_run.call_count, 'fetch, ancestry, and fast-forward are still required')
+        calls = [call.args[0] for call in git_run.call_args_list]
+        self.assertTrue(any('fetch' in call for call in calls))
+        self.assertTrue(any('merge-base' in call for call in calls))
+        self.assertTrue(any('merge' in call and '--ff-only' in call for call in calls))
+        timings=receipt['timingsMs']
+        self.assertEqual({'dockerInventory','windowsPreflight','gatewayMain',
+                          'windowsFetch','fetchHeadRead','windowsAfterFetch',
+                          'gitAncestry','fastForward','windowsReadback','executeTotal'},set(timings))
+        self.assertTrue(all(type(timings[k]) is int and timings[k]>=0 for k in timings))
+        self.assertTrue(self.pull.worker.path.exists())
+
+    def test_gateway_main_mismatch_still_prevents_windows_git_and_is_measured(self):
+        preview=self.pull.preview('sample','one')
+        docker=[{'kind':'primary','branch':'main','head':NEW,'clean':True,
+                 'origin':ORIGIN,'targetEligible':True}]
+        current={'error':None,'branch':'main','clean':True,'head':OLD,'originValid':True}
+        with mock.patch('mirror_api.pull.docker_inventory',return_value={'sample':docker}), \
+             mock.patch('mirror_api.pull.windows_status',return_value=current), \
+             mock.patch('mirror_api.pull.github_main',return_value={'head':OLD,'error':None}) as gh, \
+             mock.patch('mirror_api.pull.subprocess.run') as git_run:
+            result=self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
+        self.assertEqual('UNCERTAIN',result['state'])
+        self.assertEqual('GITHUB_MAIN_CHANGED',result['error'])
+        self.assertIn('gatewayMain',result['timingsMs'])
+        self.assertIn('executeTotal',result['timingsMs'])
+        gh.assert_called_once_with('sample',ORIGIN,details=False)
+        git_run.assert_not_called()
+        self.assertEqual('UNCERTAIN',self.pull.status('sample','one',preview['requestId'])['state'])
+        with self.assertRaises(PullDenied):
+            self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
+
+    def test_readback_reconciliation_preserves_uncertain_receipt_timings(self):
+        import sqlite3
+        preview=self.pull.preview('sample','one')
+        payload={'requestId':preview['requestId'],'repoId':'sample',
+                 'expectedHead':OLD,'targetSha':NEW,'origin':ORIGIN}
+        self.pull.requests[preview['requestId']]['state']='DISPATCHING'
+        previous={'requestId':preview['requestId'],'state':'UNCERTAIN',
+                  'head':None,'error':'WINDOWS_READBACK_UNCONFIRMED',
+                  'timingsMs':{'gatewayMain':4500,'windowsFetch':300,'executeTotal':5200}}
+        with sqlite3.connect(self.pull.worker.path) as db:
+            db.execute('INSERT INTO pull_receipts VALUES(?,?,?,?)',
+                       (preview['requestId'],json.dumps(payload),'UNCERTAIN',json.dumps(previous)))
+        with mock.patch('mirror_api.pull.windows_status', return_value={
+                'error':None,'head':NEW,'branch':'main','clean':True,'originValid':True}) as read:
+            result=self.pull.status('sample','one',preview['requestId'])
+        self.assertEqual('EXECUTED',result['state'])
+        self.assertEqual(previous['timingsMs'],result['timingsMs'])
+        self.assertEqual(1,read.call_count,'No Git operation is allowed during reconciliation')
+        self.assertEqual(result,self.pull.status('sample','one',preview['requestId']))
+
+    def test_preview_returns_bounded_server_timings(self):
+        self.mirror.data['repositories'][0]['readTimingsMs']={
+            'dockerInventory':123,'windowsGit':80,'githubGateway':3100,'gitAncestry':8,
+            'windowsFetch':999999999,'unrelated':45}
+        preview=self.pull.preview('sample','one')
+        timings=preview['timingsMs']
+        self.assertGreaterEqual(timings['previewTotal'],0)
+        self.assertEqual(123,timings['previewDocker'])
+        self.assertEqual(80,timings['previewWindows'])
+        self.assertEqual(3100,timings['previewGateway'])
+        self.assertEqual(8,timings['previewAncestry'])
+        self.assertNotIn('unrelated',timings)
+        self.assertNotIn('windowsFetch',timings)
+
     def test_requires_durable_receipt_store(self):
         with mock.patch.dict('os.environ', {'LOCALAPPDATA': ''}):
             service = BrowserPull(self.mirror)

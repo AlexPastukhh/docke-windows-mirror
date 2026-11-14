@@ -60,7 +60,8 @@ class BrowserPull:
     def preview(self, repo_id, session):
         if type(repo_id) is not str or not REPO.fullmatch(repo_id) or not session:
             raise PullDenied('REPOSITORY_NOT_ALLOWED')
-        # Ensure durable receipt storage is available before offering approval.
+        # Include receipt-store initialization in the server Preview duration.
+        started = time.perf_counter()
         self._worker()
         data = self.mirror.inventory(remote=True, repo=repo_id)
         items = data.get('repositories')
@@ -109,7 +110,18 @@ class BrowserPull:
             'requiredCI': github.get('requiredCI', 'NOT_VERIFIED'),
             'fastForward': 'TO_BE_VERIFIED_AFTER_FETCH' if relation == 'unknown' else relation,
             'previewId': None, 'requestId': None, 'expiresInSeconds': 0,
+            'timingsMs': {'previewTotal': round((time.perf_counter() - started) * 1000)},
         }
+        # The underlying inventory contains independent timings for the same
+        # single repo. They are diagnostic only, never part of authorization.
+        observed = row.get('readTimingsMs') or {}
+        for source, key in (('dockerInventory', 'previewDocker'),
+                            ('windowsGit', 'previewWindows'),
+                            ('githubGateway', 'previewGateway'),
+                            ('gitAncestry', 'previewAncestry')):
+            value = observed.get(source)
+            if type(value) in (int, float) and 0 <= value <= 600000:
+                result['timingsMs'][key] = round(value)
         if reasons:
             return result
         item = {

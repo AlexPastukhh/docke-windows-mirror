@@ -83,6 +83,10 @@ class PullWorker:
                     observed["originValid"]):
                 receipt = {"requestId": request_id, "state": "EXECUTED",
                            "head": original["targetSha"], "checkedAt": checked_at()}
+                if saved:
+                    previous = json.loads(saved)
+                    if type(previous) is dict and type(previous.get('timingsMs')) is dict:
+                        receipt['timingsMs'] = previous['timingsMs']
                 with self._db() as db:
                     db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=? AND state IN ('DISPATCHED','UNCERTAIN')",
                                ("EXECUTED", json.dumps(receipt, sort_keys=True), request_id))
@@ -113,8 +117,10 @@ class PullWorker:
                     raise PullDenied("REPOSITORY_OPERATION_PENDING")
                 db.execute("INSERT INTO pull_receipts VALUES(?,?,?,?)",
                            (value["requestId"], frozen, "DISPATCHED", None))
+            timings = {}
+            started = time.perf_counter()
             try:
-                receipt = self._execute(value)
+                receipt = self._execute(value, timings=timings)
             except (PullDenied, ObservationError) as exc:
                 # After reservation, any error might have interrupted the effect.
                 # Never retry it automatically. Readback/reconcile may resolve it.
@@ -125,6 +131,10 @@ class PullWorker:
             except Exception:
                 receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
                            "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at()}
+            if timings:
+                # Only bounded durations, no Git paths/credentials/CLI output.
+                timings['executeTotal'] = round((time.perf_counter() - started) * 1000)
+                receipt['timingsMs'] = timings
             with self._db() as db:
                 db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=?",
                            (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
@@ -157,12 +167,22 @@ class PullWorker:
                 return
         raise PullReadbackUnconfirmed(issues)
 
-    def _execute(self, p):
+    def _execute(self, p, *, timings=None):
+        if timings is None:
+            timings = {}
+
+        def measured(stage, operation):
+            started = time.perf_counter()
+            try:
+                return operation()
+            finally:
+                timings[stage] = round((time.perf_counter() - started) * 1000)
+
         repo = p["repoId"]
         origin = p["origin"]
         # No raw path or ref from request; enforce the configured Windows root.
         root = self.mirror.windows_root / repo
-        registered = docker_inventory().get(repo)
+        registered = measured('dockerInventory', lambda: docker_inventory(repo).get(repo))
         if not isinstance(registered, list):
             raise PullDenied("DOCKER_REPOSITORY_NOT_REGISTERED")
         primary = next((row for row in registered if row.get("kind") == "primary"), None)
@@ -172,43 +192,51 @@ class PullWorker:
                 primary.get("targetEligible") is not True or
                 primary.get("head") != p["targetSha"]):
             raise PullDenied("DOCKER_MAIN_NOT_AT_TARGET")
-        current = windows_status(self.mirror.windows_root, repo, origin)
+        current = measured('windowsPreflight',
+            lambda: windows_status(self.mirror.windows_root, repo, origin))
         if (current["error"] or current["branch"] != "main" or
                 current["clean"] is not True or current["head"] != p["expectedHead"] or
                 not current["originValid"]):
             raise PullDenied("WINDOWS_PRECONDITIONS_CHANGED")
-        remote = github_main(repo, origin)
+        # Pull authorization needs a fresh exact main SHA, not PR/CI history.
+        remote = measured('gatewayMain', lambda: github_main(repo, origin, details=False))
         if remote["error"] or remote["head"] != p["targetSha"]:
             raise PullDenied("GITHUB_MAIN_CHANGED")
         # A GitHub credential, if needed, must already be configured for this
         # Windows clone. Never accept one in the request or read Gateway secrets.
-        fetched = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                "-c", "protocol.file.allow=never", "-C", str(root), "fetch", "--no-tags",
-                "--no-recurse-submodules", "origin", "main"],
+        fetched = measured('windowsFetch', lambda: subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                 "-c", "protocol.file.allow=never", "-C", str(root), "fetch", "--no-tags",
+                 "--no-recurse-submodules", "origin", "main"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=180, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never"))
+                timeout=180, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")))
         if fetched.returncode:
             raise ObservationError("WINDOWS_FETCH_FAILED")
-        fetched_head = git(root, "rev-parse", "--verify", "FETCH_HEAD")
+        fetched_head = measured('fetchHeadRead',
+            lambda: git(root, "rev-parse", "--verify", "FETCH_HEAD"))
         if fetched_head != p["targetSha"]:
             raise PullDenied("FETCHED_TARGET_CHANGED")
-        again = windows_status(self.mirror.windows_root, repo, origin)
+        again = measured('windowsAfterFetch',
+            lambda: windows_status(self.mirror.windows_root, repo, origin))
         if (again["error"] or again["branch"] != "main" or
                 again["head"] != p["expectedHead"] or
                 again["clean"] is not True or not again["originValid"]):
             raise PullDenied("WINDOWS_CHANGED_AFTER_FETCH")
         # A pinned SHA is required, never mutable FETCH_HEAD as the merge target.
-        ancestry = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
-                p["expectedHead"], p["targetSha"]], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        ancestry = measured('gitAncestry', lambda: subprocess.run(
+                ["git", "-C", str(root), "merge-base", "--is-ancestor",
+                 p["expectedHead"], p["targetSha"]], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10))
         if ancestry.returncode:
             raise PullDenied("NOT_FAST_FORWARD")
-        update = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                "-c", "protocol.file.allow=never", "-C", str(root), "merge", "--ff-only",
-                p["targetSha"]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=180)
+        update = measured('fastForward', lambda: subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                 "-c", "protocol.file.allow=never", "-C", str(root), "merge", "--ff-only",
+                 p["targetSha"]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=180))
         if update.returncode:
             raise ObservationError("WINDOWS_FF_FAILED")
-        self._confirmed_readback(repo, origin, p["targetSha"])
+        measured('windowsReadback',
+            lambda: self._confirmed_readback(repo, origin, p["targetSha"]))
         return {"requestId": p["requestId"], "state": "EXECUTED",
                 "head": p["targetSha"], "checkedAt": checked_at()}
