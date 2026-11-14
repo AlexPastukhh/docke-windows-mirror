@@ -189,6 +189,29 @@ Mirror may also inspect locally present Docker Git objects with read-only
 `merge-base`, without `fetch`, to prove `ahead` or `diverged` where possible.
 The primary row and detail block display proven direction, evidence, and
 specific Windows Pull blockers such as `DOCKER_MAIN_NOT_AT_GITHUB_MAIN`.
+
+**Local folder vs. GitHub repository:** the table, selected checks, Windows clone
+path, linked worktrees and Pull receipt retain the Docker primary folder name
+(`repoId`). The Gateway READ target is separately derived from the primary's
+actual `origin`, which must be a complete canonical HTTPS or SSH GitHub URL
+under the fixed trusted owner `AlexPastukhh`. Thus Docker `ai-conspects` may
+read GitHub `theory_conspects_and_banks` without renaming local folders or
+switching Git refs. The selected row explicitly shows the verified GitHub
+repository slug. Missing, foreign-owner, unrecognized or unsafe origins produce
+`ORIGIN_MISSING` / `ORIGIN_NOT_ALLOWED` and **never** issue a Gateway request.
+Windows origin must still equal the exact Docker origin, Windows main must be
+clean, and Pull still requires exact GitHub main, fresh server Preview,
+fast-forward proof, pinned SHA and durable receipt; origin mapping grants no
+new write route or automatic action.
+
+**Failures are observations, not successes:** a successful Browser HTTP response
+can still contain a denied or unavailable Gateway `main` read. The reader
+reports recognized Gateway statuses (for example `GATEWAY_HTTP_403`) as bounded
+codes without raw provider errors, and never assumes why the 403 occurred.
+The browser names the failure in the GitHub column and lower details while
+blocking Pull. Owner check progress counts completed requests separately from
+rows with unverified GitHub main, Windows fetch errors and HTTP/request failures.
+A completed count of all Docker rows is not evidence all GitHub refs were read.
 The check can update Git objects/FETCH_HEAD and possibly remote tracking refs,
 **not** Windows HEAD/index/worktree. `fetch` error, timeout, moving remote or
 changed Windows status stays unknown, displays an explicit error and blocks

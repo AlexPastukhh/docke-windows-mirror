@@ -380,17 +380,86 @@ class DynamicGatewayTests(unittest.TestCase):
         self.assertIsNone(data['head'])
         self.assertEqual('GATEWAY_BRANCH_READ_UNAVAILABLE',data['errors']['branches'])
 
-    def test_github_origin_requires_exact_repository_and_gateway(self):
+    def test_github_origin_maps_registered_local_folder_to_verified_owner_repo(self):
         from mirror_api.operations import github_main
         with mock.patch('mirror_api.operations.gateway_pr_ci') as source:
-            wrong=github_main('docke-windows-mirror',
-                'https://github.com/AlexPastukhh/other-repo.git')
-            self.assertEqual('ORIGIN_NOT_ALLOWED',wrong['error'])
+            for origin in ('', None):
+                self.assertEqual('ORIGIN_MISSING', github_main('ai-conspects',origin)['error'])
+            for origin in (
+                'https://github.com/OtherOwner/theory_conspects_and_banks.git',
+                'https://example.invalid/AlexPastukhh/theory_conspects_and_banks.git',
+                'https://github.com/AlexPastukhh/theory_conspects_and_banks.git?x=1',
+                'https://github.com/AlexPastukhh/theory_conspects_and_banks.git/other',
+                'file:///repo/secret',
+                'https://github.com/AlexPastukhh/..',
+            ):
+                self.assertEqual('ORIGIN_NOT_ALLOWED',
+                    github_main('ai-conspects',origin)['error'], origin)
             source.assert_not_called()
             source.return_value={'head':SHA1,'branches':{'main':SHA1},
                 'pullRequests':[],'workflowRuns':[],'checkRuns':{},'errors':{},'truncated':{}}
-            result=github_main('docke-windows-mirror',
-                'https://github.com/AlexPastukhh/docke-windows-mirror.git')
+            result=github_main('ai-conspects',
+                'https://github.com/AlexPastukhh/theory_conspects_and_banks.git')
             self.assertEqual(SHA1,result['head'])
+            self.assertEqual('ai-conspects',result['repoId'], 'Local folder key must be unchanged')
+            self.assertEqual('theory_conspects_and_banks',result['githubRepository'])
             self.assertEqual('fortis-gateway', result['source'])
+            source.assert_called_once_with('theory_conspects_and_banks')
+            source.reset_mock()
+            github_main('docke-windows-mirror',
+                'https://github.com/AlexPastukhh/docke-windows-mirror.git')
             source.assert_called_once_with('docke-windows-mirror')
+
+    def test_origin_alias_inventory_keeps_local_paths_and_guarded_pull(self):
+        from mirror_api.operations import Mirror
+        origin='https://github.com/AlexPastukhh/theory_conspects_and_banks.git'
+        primary=dict(kind='primary',branch='main',head=SHA1,clean=True,
+                     targetEligible=True,origin=origin,status='registered')
+        windows=dict(exists=True,head=SHA2,branch='main',origin=origin,
+                     originValid=True,error=None,clean=True,relation='unknown')
+        with mock.patch('mirror_api.operations.docker_inventory', return_value={'ai-conspects':[primary]}), \
+             mock.patch('mirror_api.operations.windows_status',return_value=windows) as win, \
+             mock.patch('mirror_api.operations.gateway_pr_ci',return_value={
+                 'head':SHA1,'branches':{'main':SHA1},'pullRequests':None,
+                 'workflowRuns':None,'checkRuns':{},'errors':{},'truncated':{}}) as gateway:
+            data=Mirror('/tmp/safe-repos').inventory(remote=True,repo='ai-conspects')
+        row=data['repositories'][0]
+        self.assertEqual('ai-conspects',row['repoId'])
+        self.assertEqual('theory_conspects_and_banks',row['github']['githubRepository'])
+        self.assertEqual(SHA1,row['github']['head'])
+        gateway.assert_called_once_with('theory_conspects_and_banks',main_only=True,
+                                        main_ancestor_sha=SHA1)
+        self.assertEqual('ai-conspects',win.call_args.args[1],
+                         'Windows clone name must remain local repo folder')
+        self.assertEqual(origin,win.call_args.args[2],
+                         'The exact Docker origin still binds Windows trust')
+        self.assertTrue(row['actions']['pull_main_browser']['available'],
+                        'Only the same guarded preview conditions may permit Pull')
+        untrusted=dict(windows,originValid=False)
+        with mock.patch('mirror_api.operations.docker_inventory',return_value={'ai-conspects':[primary]}), \
+             mock.patch('mirror_api.operations.windows_status',return_value=untrusted), \
+             mock.patch('mirror_api.operations.gateway_pr_ci',return_value={
+                 'head':SHA1,'branches':{'main':SHA1},'pullRequests':None,
+                 'workflowRuns':None,'checkRuns':{},'errors':{},'truncated':{}}):
+            bad=Mirror('/tmp/safe-repos').inventory(remote=True,repo='ai-conspects')
+        self.assertFalse(bad['repositories'][0]['actions']['pull_main_browser']['available'],
+                         'Different Windows origin must block Pull even for a mapped alias')
+
+    def test_gateway_denial_propagates_bounded_http_code(self):
+        class Client:
+            def list_branches(self,repo,*,page,per_page):
+                raise reader.Denied('FORTIS_HTTP_403')
+        row=reader.collect(Client(),REPO,main_only=True)
+        self.assertIsNone(row['head'])
+        self.assertEqual('GATEWAY_HTTP_403',row['errors']['branches'])
+        class OtherClient:
+            def list_branches(self,repo,*,page,per_page):
+                raise reader.Denied('SECRET_BEARER_OR_OTHER_FAILURE')
+        other=reader.collect(OtherClient(),REPO,main_only=True)
+        self.assertEqual('GATEWAY_BRANCH_READ_UNAVAILABLE',other['errors']['branches'],
+                         'Unbounded provider exception text must not reach the browser')
+        from mirror_api.operations import github_main
+        with mock.patch('mirror_api.operations.gateway_pr_ci',return_value=row):
+            value=github_main(REPO,'https://github.com/AlexPastukhh/fortis-approvals.git')
+        self.assertEqual('GATEWAY_HTTP_403',value['error'])
+        self.assertIsNone(value['head'])
