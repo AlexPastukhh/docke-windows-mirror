@@ -1,6 +1,6 @@
 # MIRROR_API_CONTRACT_V1 — unified Mirror, P0
 
-Status: **PROPOSED / SECURITY REVIEW REQUIRED / NO RUNTIME ACTIVATION**.
+Status: **P0 SOURCE ACCEPTED (owner merge PR #23) / NO MACHINE RUNTIME ACTIVATION**.
 This is the logical contract v1; its new machine wire protocol is **v2**.
 The accepted `mirror.get_repository` operation version `1` stays unchanged.
 Merge of this document alone cannot authorize a machine effect or deployment.
@@ -122,10 +122,10 @@ rebound to another actor/repo/payload. Upstream trusted dispatch binds actor;
 result lookup also binds repo and initiating principal. Audit visibility through
 UC-GW-009 does not grant another actor execution or result ownership.
 
-## D-04 proposal: model B, fail closed until accepted
+## D-04: model B selected at P0, effects fail closed until P4
 
 Model A cannot independently prove ASK if a reachable WRITE bearer is stolen.
-This proposal selects **B**: pinned Gateway signing public key on Windows and a
+Accepted P0 selects **B**: pinned Gateway signing public key on Windows and a
 dedicated private signing credential inside Gateway. A bearer alone is never
 sufficient. This is a new reviewed signing capability, absent from today's
 Gateway; the existing vault/controller must be assessed before implementing it.

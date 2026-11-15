@@ -41,6 +41,15 @@ const show = value => known(value) ? String(value) : '—';
 const short = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 8) : '—';
 const ghChecked = row => Boolean(!row.remoteCheckError && row.github && row.github.head && !row.github.error);
 const GITHUB_FAILURE_LABELS = {
+  GITHUB_WINDOWS_REQUIRED: 'GITHUB: НУЖЕН WINDOWS',
+  GITHUB_CLI_UNAVAILABLE: 'GITHUB: GH CLI НЕДОСТУПЕН',
+  GITHUB_AUTH_OR_READ_FAILED: 'GITHUB: ПРОВЕРЬТЕ GH AUTH',
+  GITHUB_HTTP_401: 'GITHUB: HTTP 401',
+  GITHUB_HTTP_403: 'GITHUB: HTTP 403',
+  GITHUB_HTTP_404: 'GITHUB: HTTP 404',
+  GITHUB_HTTP_429: 'GITHUB: HTTP 429',
+  GITHUB_TIMEOUT: 'GITHUB: ТАЙМ-АУТ',
+  GITHUB_MAIN_UNVERIFIED: 'GITHUB MAIN НЕ ПОДТВЕРЖДЁН',
   ORIGIN_MISSING: 'НЕТ ORIGIN',
   ORIGIN_NOT_ALLOWED: 'ORIGIN НЕ РАЗРЕШЁН',
   GATEWAY_HTTP_403: 'GATEWAY: HTTP 403',
@@ -370,9 +379,9 @@ function rowDetails(row) {
     'Время чтения (мс): Docker ' + show(row.readTimingsMs && row.readTimingsMs.dockerInventory) +
       ', Windows Git ' + show(row.readTimingsMs && row.readTimingsMs.windowsGit) +
       ', Windows fetch ' + show(row.readTimingsMs && row.readTimingsMs.windowsFetch) +
-      ', Gateway ' + show(row.readTimingsMs && row.readTimingsMs.githubGateway) +
+      ', GitHub ' + show(row.readTimingsMs && row.readTimingsMs.githubGateway) +
       ', Git-история ' + show(row.readTimingsMs && row.readTimingsMs.gitAncestry),
-    'Gateway этапы (мс): ' + (gh.gatewayTimingsMs ? JSON.stringify(gh.gatewayTimingsMs) : 'НЕ ПРОВЕРЕНЫ'),
+    'GitHub этапы (мс): ' + ((gh.githubTimingsMs || gh.gatewayTimingsMs) ? JSON.stringify(gh.githubTimingsMs || gh.gatewayTimingsMs) : 'НЕ ПРОВЕРЕНЫ'),
     'Локальная проверка Windows: ' + show(w.checkedAt),
     'Проверка GitHub: ' + (row.remoteCheckError ? 'ОШИБКА: ' + row.remoteCheckError :
       ghChecked(row) ? show(row.remoteCheckedAt || gh.checkedAt) : githubFailure(row) || 'НЕ ПРОВЕРЕН'),
@@ -788,9 +797,9 @@ async function refreshRepository(repo) {
 // Treat them as diagnostics; never use them to approve or repeat a Git effect.
 const PULL_TIMING_LABELS = [
   ['previewTotal', 'Preview сервер'], ['previewDocker', 'Preview Docker'],
-  ['previewWindows', 'Preview Windows'], ['previewGateway', 'Preview Gateway'],
+  ['previewWindows', 'Preview Windows'], ['previewGateway', 'Preview GitHub'],
   ['dockerInventory', 'Execute Docker'], ['windowsPreflight', 'Windows до fetch'],
-  ['gatewayMain', 'Execute Gateway main'], ['windowsFetch', 'Windows fetch'],
+  ['gatewayMain', 'Execute GitHub main'], ['windowsFetch', 'Windows fetch'],
   ['fetchHeadRead', 'Проверка FETCH_HEAD'], ['windowsAfterFetch', 'Windows после fetch'],
   ['gitAncestry', 'Проверка fast-forward'], ['fastForward', 'Git merge --ff-only'],
   ['windowsReadback', 'Итоговая проверка Windows'], ['executeTotal', 'Execute сервер']

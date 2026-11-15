@@ -138,8 +138,8 @@ const fetch = async (url, options = {}) => {
                         'updated-task', {checked:true, relation:'equal'});
     if (denyGatewayRead && name === 'fortis-approvals') {
       row.github.head = null; row.github.branches = {};
-      row.github.error = 'GATEWAY_HTTP_403';
-      row.github.readErrors = {branches: 'GATEWAY_HTTP_403'};
+      row.github.error = 'GITHUB_HTTP_403';
+      row.github.readErrors = {branches: 'GITHUB_HTTP_403'};
       row.github.githubRepository = 'fortis-approvals';
       row.actions.pull_main_browser = {available: false, reasons: ['GITHUB_MAIN_UNVERIFIED']};
     }
@@ -293,8 +293,8 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   await elements['selected-remote'].onclick();
   assert.match(elements['banner'].textContent, /GitHub не подтверждён: 1/);
   assert.match(elements['banner'].textContent, /ошибок запросов: 0/);
-  assert.equal(elements['primary-rows'].children[1].children[3].textContent, 'GATEWAY: HTTP 403');
-  assert.match(elements['row-full'].textContent, /Код ошибки GitHub: GATEWAY_HTTP_403/);
+  assert.equal(elements['primary-rows'].children[1].children[3].textContent, 'GITHUB: HTTP 403');
+  assert.match(elements['row-full'].textContent, /Код ошибки GitHub: GITHUB_HTTP_403/);
   assert.match(elements['row-full'].textContent, /GitHub репозиторий из Docker origin: fortis-approvals/);
   assert.equal(elements['pull-windows'].disabled, true);
   const denied = vm.runInContext("rows.find(row => row.repoId === 'fortis-approvals')", sandbox);
@@ -370,7 +370,7 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   releaseCheck = null;
   assert.equal(typeof releaseRefresh, 'function', 'Success schedules a separate table refresh');
   assert.match(elements['pull-result'].textContent, /Время Pull/);
-  assert.match(elements['pull-result'].textContent, /Execute Gateway main: 200 мс/);
+  assert.match(elements['pull-result'].textContent, /Execute GitHub main: 200 мс/);
   assert.match(elements['pull-result'].textContent, /Windows fetch: 350 мс/);
   assert.match(elements['pull-result'].textContent, /Git merge --ff-only: 4 мс/);
   assert.equal(elements['receipt-controls'].hidden, true, 'Success is confirmed before table refresh');

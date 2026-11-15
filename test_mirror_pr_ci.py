@@ -382,7 +382,7 @@ class DynamicGatewayTests(unittest.TestCase):
 
     def test_github_origin_maps_registered_local_folder_to_verified_owner_repo(self):
         from mirror_api.operations import github_main
-        with mock.patch('mirror_api.operations.gateway_pr_ci') as source:
+        with mock.patch('mirror_api.operations.windows_github_snapshot') as source:
             for origin in ('', None):
                 self.assertEqual('ORIGIN_MISSING', github_main('ai-conspects',origin)['error'])
             for origin in (
@@ -403,7 +403,7 @@ class DynamicGatewayTests(unittest.TestCase):
             self.assertEqual(SHA1,result['head'])
             self.assertEqual('ai-conspects',result['repoId'], 'Local folder key must be unchanged')
             self.assertEqual('theory_conspects_and_banks',result['githubRepository'])
-            self.assertEqual('fortis-gateway', result['source'])
+            self.assertEqual('windows-gh', result['source'])
             source.assert_called_once_with('theory_conspects_and_banks')
             source.reset_mock()
             github_main('docke-windows-mirror',
@@ -419,7 +419,7 @@ class DynamicGatewayTests(unittest.TestCase):
                      originValid=True,error=None,clean=True,relation='unknown')
         with mock.patch('mirror_api.operations.docker_inventory', return_value={'ai-conspects':[primary]}), \
              mock.patch('mirror_api.operations.windows_status',return_value=windows) as win, \
-             mock.patch('mirror_api.operations.gateway_pr_ci',return_value={
+             mock.patch('mirror_api.operations.windows_github_snapshot',return_value={
                  'head':SHA1,'branches':{'main':SHA1},'pullRequests':None,
                  'workflowRuns':None,'checkRuns':{},'errors':{},'truncated':{}}) as gateway:
             data=Mirror('/tmp/safe-repos').inventory(remote=True,repo='ai-conspects')
@@ -438,7 +438,7 @@ class DynamicGatewayTests(unittest.TestCase):
         untrusted=dict(windows,originValid=False)
         with mock.patch('mirror_api.operations.docker_inventory',return_value={'ai-conspects':[primary]}), \
              mock.patch('mirror_api.operations.windows_status',return_value=untrusted), \
-             mock.patch('mirror_api.operations.gateway_pr_ci',return_value={
+             mock.patch('mirror_api.operations.windows_github_snapshot',return_value={
                  'head':SHA1,'branches':{'main':SHA1},'pullRequests':None,
                  'workflowRuns':None,'checkRuns':{},'errors':{},'truncated':{}}):
             bad=Mirror('/tmp/safe-repos').inventory(remote=True,repo='ai-conspects')
@@ -459,7 +459,8 @@ class DynamicGatewayTests(unittest.TestCase):
         self.assertEqual('GATEWAY_BRANCH_READ_UNAVAILABLE',other['errors']['branches'],
                          'Unbounded provider exception text must not reach the browser')
         from mirror_api.operations import github_main
-        with mock.patch('mirror_api.operations.gateway_pr_ci',return_value=row):
+        row={**row,'errors':{'branches':'GITHUB_HTTP_403'}}
+        with mock.patch('mirror_api.operations.windows_github_snapshot',return_value=row):
             value=github_main(REPO,'https://github.com/AlexPastukhh/fortis-approvals.git')
-        self.assertEqual('GATEWAY_HTTP_403',value['error'])
+        self.assertEqual('GITHUB_HTTP_403',value['error'])
         self.assertIsNone(value['head'])
