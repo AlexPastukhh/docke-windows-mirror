@@ -2,6 +2,27 @@
 
 **Единый файл будущих улучшений этого репозитория.** Mirror владеет UI, проверкой Docker/GitHub/Windows SHAs и owner-guarded Windows import. Нормативный процесс GitHub → CI → Windows описан только в [`docs/WORKFLOW.md`](WORKFLOW.md) и общем UC-CONT-002; backlog не заменяет runbook и не разрешает mutation.
 
+## Unified Mirror API — P0 review (2026-11-15)
+
+[P0 contract/schemas](MIRROR_API_CONTRACT_V1.md) — PROPOSED, не реализация v2.
+[Source/catalog review](unified-api/P0_SOURCE_REVIEW_2026-11-15.md) отделяет
+проверенные исходники от неподтверждённой установленной runtime.
+
+- P0: owner security review модели B, узкого делегирования UC-CONT-003,
+  closed schemas, v1 compatibility и стадий UC-GW-012; до принятия — DENY.
+- P1: Windows owner-managed Git/gh reader без Gateway fallback; Git/gh scopes
+  и browser main/PR/CI при отключённом Gateway подтвердить на Windows.
+- P2: один Core/worker/receipt и process guard; сохранить существующий общий
+  browser check/Pull mutex, проверить crash/UNCERTAIN и все пути второго writer.
+- P3: typed v2 READ при сохранённом strict v1; отдельные source CI,
+  Windows install, Gateway release и fresh live READ с отрицательными probes.
+- P4: signed ASK dispatch, deny legacy POST, principal-bound lookup и один
+  exact-SHA ff-only; no-approval/READ credential/replay/timeout/concurrency tests.
+- P5: owner cutover/rollback с сохранённой DB; старый listener/launcher не
+  удалять до живой приёмки. P6 обновляет docs/evidence на каждом этапе.
+- Windows-only inventory из открытого Approvals PR #87 — отдельный scope;
+  не расширять зарегистрированные пары и права автоматически.
+
 ## Mirror UX / readback — source в task (до merge и Windows acceptance)
 
 - Компактная таблица: независимо сворачиваемые группы Docker/Windows,
@@ -60,19 +81,11 @@
   требует отдельного owner-run Windows acceptance: штатный fast-forward и
   отказы на dirty/ahead/diverged/Gateway unavailable, а также readback/replay.
   Наличие тестов на Linux не подтверждает Windows Git/NTFS/GCM.
-- TLS/credential/receipt lifecycle для **отдельного Gateway ↔ Windows listener**,
-  реальные fast-forward/reject/replay проверки и AI ASK Pull требуют отдельного acceptance.
-  Mirror-provider остаётся **untracked source** в `fortis-approvals`
-  `task/mirror-provider-20261107`, отсутствует в принятом Gateway `main`,
-  не активирован. В нём `pull_main` всё ещё требует `mergeRequestId` от
-  Gateway-managed merge, тогда как владелец сливает через GitHub UI.
-  Перед внедрением необходимо перейти на Gateway-доказательство конкретного
-  owner UI merge/PR HEAD/merge SHA/GitHub main, сохранить CI/review gate,
-  ASK/WebAuthn и Windows ff-only preflight + reject/replay tests. Владельцы
-  подключения и acceptance —
-  [UC-GW-002](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/integrations.md#uc-gw-002)
-  и [UC-GW-005](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/releases.md#uc-gw-005).
-  **Не активировать** исходную версию provider до переработки.
+- Принятый Gateway Mirror READ v1 и работающий AI ASK Pull — разные стадии.
+  Provider READ находится в Gateway main; исторический untracked `pull_main`
+  не является принятой реализацией эффекта. TLS/receipt/reject/replay и AI ASK
+  gates остаются открыты в Unified Mirror API P0–P5 выше. Владельцы —
+  UC-GW-003/005/009/012; source/catalog не доказывает Windows live acceptance.
 - Windows service packaging/lifecycle, WinForms retirement и остальные UI actions
   (PR creation/Ready, CI controls, submission of Gateway ASK) не входят в
   подтверждённый Browser контракт (чтение + owner-local Pull Windows main). Выбирать необходимый следующий scope

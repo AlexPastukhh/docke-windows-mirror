@@ -1,0 +1,190 @@
+{
+  "contract": "MIRROR_API_CONTRACT_V1",
+  "status": "PROPOSED",
+  "wireVersion": 2,
+  "trustModel": "B_PROPOSED",
+  "runtimeActivation": false,
+  "schemaFile": "schemas.json",
+  "operations": [
+    {
+      "logicalOperation": "list_repositories",
+      "operation": "list_repositories_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories",
+      "targetKind": "inventory",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/pageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/list_repositories_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "get_repository",
+      "operation": "get_repository_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/emptyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/get_repository_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "list_worktrees",
+      "operation": "list_worktrees_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}/worktrees",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/pageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/list_worktrees_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "get_github_status",
+      "operation": "get_github_status_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}/github",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/pageParams"
+      },
+      "result": {
+        "$ref": "#/$defs/get_github_status_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "get_available_actions",
+      "operation": "get_available_actions_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}/actions",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/emptyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/get_available_actions_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "check_windows_history",
+      "operation": "check_windows_history_v2",
+      "version": "2",
+      "method": "POST",
+      "path": "/gateway/v2/repositories/{repoId}/history-check",
+      "targetKind": "repo",
+      "kind": "write",
+      "intendedPolicy": "DENY",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/executeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/check_windows_history_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "preview_windows_pull",
+      "operation": "preview_windows_pull_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}/pull-preview",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/emptyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/preview_windows_pull_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "execute_windows_pull",
+      "operation": "execute_windows_pull_v2",
+      "version": "2",
+      "method": "POST",
+      "path": "/gateway/v2/repositories/{repoId}/pull",
+      "targetKind": "repo",
+      "kind": "write",
+      "intendedPolicy": "ASK",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/executeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/execute_windows_pull_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "get_windows_pull_result",
+      "operation": "get_windows_pull_result_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/repositories/{repoId}/pull-results/{requestId}",
+      "targetKind": "repo",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/lookupParams"
+      },
+      "result": {
+        "$ref": "#/$defs/get_windows_pull_result_v2Result"
+      }
+    },
+    {
+      "logicalOperation": "get_capabilities",
+      "operation": "get_capabilities_v2",
+      "version": "2",
+      "method": "GET",
+      "path": "/gateway/v2/capabilities",
+      "targetKind": "inventory",
+      "kind": "read",
+      "intendedPolicy": "ALLOW",
+      "defaultPolicy": "DENY",
+      "implemented": false,
+      "params": {
+        "$ref": "#/$defs/emptyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/get_capabilities_v2Result"
+      }
+    }
+  ]
+}
