@@ -11,21 +11,16 @@ This document owns the new service/frontend source usage and its current limits.
 - Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows check and Pull are separate from GitHub publication; both may perform constrained Windows `git fetch origin main` under the owner's Git credentials, but **only Pull** can run `merge --ff-only`.
 - `mirror_api.pull`: shared Windows `main`-only fast-forward worker with exact SHA, clean Docker `main` == verified GitHub `main`, matching trusted Docker/Windows origin, repeated Windows/GitHub preflight, fixed `git fetch` and pinned `merge --ff-only`, readback and durable SQLite receipt. `mirror_api.browser_pull` authorizes a one-shot owner-local browser invocation; an additional authenticated HTTPS Gateway listener is separately configurable and disabled by default. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
 - **Owner-local Pull latency:** the server Preview returns `timingsMs.previewTotal` plus available Docker/Windows/Gateway/ancestry observations. Execute rechecks only the selected registered Docker primary (`docker_inventory(repo)`, never the whole workspace) and fetches fresh exact Gateway **main-only** SHA (`github_main(..., details=False)`; no PR/CI fanout). All original clean/branch/origin/SHA guards, Windows Git `fetch`, `merge-base --is-ancestor`, pinned `merge --ff-only` and readback remain mandatory. The durable SQLite receipt stores bounded integer `timingsMs` for Docker, preflight, Gateway main, Windows fetch/FETCH_HEAD, post-fetch status, ancestry, merge, final readback and Execute total; even an ambiguous result keeps completed-stage timings without a Git retry. A confirmed receipt is shown immediately: the following **read-only** table refresh happens asynchronously, so a slow Gateway GET cannot hold the Pull action open. The UI displays server and browser elapsed times separately (these overlap and must not be summed). Durations from source/fixtures are not evidence of live Windows speed; owner acceptance needs an actual Windows Pull after updating installed source.
-- **Mirror-provider не является действующим Gateway provider:** его исходники
-  (`fortis_approvals/integrations/mirror/`) находятся как **untracked** файлы
-  только в `fortis-approvals` task worktree `task/mirror-provider-20261107`;
-  в принятом `fortis-approvals/main` этого каталога нет. Ни установка,
-  ни регистрация, ни TLS/Windows Pull acceptance этим не подтверждаются.
-  В текущем source candidate операция `pull_main` требует Gateway
-  `mergeRequestId` от `github.merge_pull_request` и **не совместима** с принятым
-  ручным Merge через GitHub UI. Для Docker main существует отдельная
-  работающая `workspace.update_main_from_pr`, но она не включает Windows Pull.
-  Provider следует отдельно переработать под проверенное owner UI merge
-  (точный PR HEAD/merge SHA/текущий GitHub main, CI и строгие Windows
-  preconditions), протестировать и принять через
-  [UC-GW-002](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/integrations.md#uc-gw-002)
-  и [UC-GW-005](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/releases.md#uc-gw-005).
-  До этого **не активировать** старую реализацию как Windows Pull provider.
+- **Gateway READ v1 принят в source:** `fortis_approvals/integrations/mirror/`
+  содержит только `get_repository`, без GitHub verification и без Pull.
+  Live catalog от 2026-11-15 подтверждает v1 READ/ALLOW для `fortis-approvals`,
+  но не Windows installed source/TLS/upstream readback. Старый untracked
+  `pull_main` candidate не является действующим ASK provider.
+  Optional `GatewayHandler.do_POST` в Mirror принимает Bearer/UUID без
+  независимого ASK-proof; его нельзя активировать как готовый AI Pull.
+  [P0 единый контракт](MIRROR_API_CONTRACT_V1.md) сохраняет старую v1 schema,
+  предлагает отдельный v2 и model B для review. Новые права/deployment
+  требуют обычных UC-GW-003/005 и owner acceptance; backlog хранит gates.
 
 ## Browser UI — primary table + optional worktrees (2026-11-08 source candidate)
 

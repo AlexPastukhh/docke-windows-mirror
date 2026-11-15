@@ -1,0 +1,2 @@
+# Offline design validation only; not a Mirror runtime dependency.
+jsonschema==4.23.0
