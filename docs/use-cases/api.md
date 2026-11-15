@@ -19,10 +19,10 @@ routes доступны и какие результаты имеют свежи
 **не даёт ИИ Git write route**. Принятый Gateway provider имеет строгий
 `get_repository` v1 READ; source/catalog readiness не доказывает Windows TLS
 или живой upstream. Отдельный удалённый Gateway ASK остаётся выключен.
-Цель P1/P2 — Windows owner-managed Git/gh reader и один Core/worker/receipt
-для browser и machine adapters; сейчас browser GitHub reader использует Gateway.
-Новый путь требует принятого узкого делегирования UC-CONT-003 и P0 security review.
-До этого GitHub READ/публикация — только typed Gateway
+P1 source использует [Windows owner-managed gh reader](../WINDOWS-GITHUB-READ.md)
+для browser main/PR/CI и свежего Pull preflight; actual Windows acceptance
+проверяется отдельно. P0 принят owner merge; P2/P3/P4 и live machine scope
+остаются gated. Нативная GitHub публикация Repo — только typed Gateway
 по [UC-CONT-003](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md#uc-cont-003).
 При неизвестном backend или scope — UNKNOWN/STOP, не credential fallback.
 

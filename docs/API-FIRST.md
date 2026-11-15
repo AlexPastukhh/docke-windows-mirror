@@ -6,11 +6,11 @@ This document owns the new service/frontend source usage and its current limits.
 
 - `mirror_api.operations` reads Docker's **Git-registered** linked worktrees, Windows primary clones, and exact GitHub heads. Ordinary GETs never fetch; the separately authorized owner check POST may fetch Windows Git metadata (`origin main`) to prove ancestry without changing Windows HEAD, index or worktree. Noncanonical worktrees remain visible, but are not eligible for native Gateway worktree mutations. An unknown status is never reported as clean/current.
 - `mirror_api.server` exposes a local browser UI and JSON API on **127.0.0.1 only**; a one-use console URL establishes a SameSite/HttpOnly cookie. Normal GETs are observational. Owner-local POSTs are: **`/api/v1/repositories/<repo>/check-windows`** for bounded Git metadata fetch only and Preview → one-use Execute for guarded Windows `main` Pull. Both require exact Host, Origin, session-derived CSRF and the normal (non-preview) runtime; only the Pull Execute may move HEAD/worktree. Other browser writes are denied. No browser session grants access to the separate Gateway listener.
-- `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only PR metadata and Actions/Checks observations come from the **existing authenticated GitHub Gateway typed client**, invoked from the Docker Repo worker by `tools/Export-Mirror-GitHub-Read.py`. Per-repo branch SHAs also come from typed Gateway `list_branches`, never local `git ls-remote` or a Windows Git credential. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
+- `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only main/PR/Actions/Checks observations now come from Windows owner-managed `gh api`, via `mirror_api.windows_github` and the transport-independent `mirror_api.github_snapshot` collector. [Windows GitHub reader](WINDOWS-GITHUB-READ.md) owns credential setup, bounds and owner acceptance. The retained `tools/Export-Mirror-GitHub-Read.py` is a typed Gateway diagnostic helper, never a browser fallback. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
   the GitHub UI's required checks/reviews; the owner verifies those before manual Merge. Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
 - Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows check and Pull are separate from GitHub publication; both may perform constrained Windows `git fetch origin main` under the owner's Git credentials, but **only Pull** can run `merge --ff-only`.
 - `mirror_api.pull`: shared Windows `main`-only fast-forward worker with exact SHA, clean Docker `main` == verified GitHub `main`, matching trusted Docker/Windows origin, repeated Windows/GitHub preflight, fixed `git fetch` and pinned `merge --ff-only`, readback and durable SQLite receipt. `mirror_api.browser_pull` authorizes a one-shot owner-local browser invocation; an additional authenticated HTTPS Gateway listener is separately configurable and disabled by default. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
-- **Owner-local Pull latency:** the server Preview returns `timingsMs.previewTotal` plus available Docker/Windows/Gateway/ancestry observations. Execute rechecks only the selected registered Docker primary (`docker_inventory(repo)`, never the whole workspace) and fetches fresh exact Gateway **main-only** SHA (`github_main(..., details=False)`; no PR/CI fanout). All original clean/branch/origin/SHA guards, Windows Git `fetch`, `merge-base --is-ancestor`, pinned `merge --ff-only` and readback remain mandatory. The durable SQLite receipt stores bounded integer `timingsMs` for Docker, preflight, Gateway main, Windows fetch/FETCH_HEAD, post-fetch status, ancestry, merge, final readback and Execute total; even an ambiguous result keeps completed-stage timings without a Git retry. A confirmed receipt is shown immediately: the following **read-only** table refresh happens asynchronously, so a slow Gateway GET cannot hold the Pull action open. The UI displays server and browser elapsed times separately (these overlap and must not be summed). Durations from source/fixtures are not evidence of live Windows speed; owner acceptance needs an actual Windows Pull after updating installed source.
+- **Owner-local Pull latency:** the server Preview returns `timingsMs.previewTotal` plus available Docker/Windows/GitHub/ancestry observations. Execute rechecks only the selected registered Docker primary (`docker_inventory(repo)`, never the whole workspace) and fetches fresh exact Windows-gh **main-only** SHA (`github_main(..., details=False)`; no PR/CI fanout). All original clean/branch/origin/SHA guards, Windows Git `fetch`, `merge-base --is-ancestor`, pinned `merge --ff-only` and readback remain mandatory. The durable SQLite receipt stores bounded integer `timingsMs` for Docker, preflight, GitHub main, Windows fetch/FETCH_HEAD, post-fetch status, ancestry, merge, final readback and Execute total; even an ambiguous result keeps completed-stage timings without a Git retry. A confirmed receipt is shown immediately: the following **read-only** table refresh happens asynchronously, so a slow GitHub read cannot hold the Pull action open. The UI displays server and browser elapsed times separately (these overlap and must not be summed). Durations from source/fixtures are not evidence of live Windows speed; owner acceptance needs an actual Windows Pull after updating installed source.
 - **Gateway READ v1 принят в source:** `fortis_approvals/integrations/mirror/`
   содержит только `get_repository`, без GitHub verification и без Pull.
   Live catalog от 2026-11-15 подтверждает v1 READ/ALLOW для `fortis-approvals`,
@@ -18,8 +18,8 @@ This document owns the new service/frontend source usage and its current limits.
   `pull_main` candidate не является действующим ASK provider.
   Optional `GatewayHandler.do_POST` в Mirror принимает Bearer/UUID без
   независимого ASK-proof; его нельзя активировать как готовый AI Pull.
-  [P0 единый контракт](MIRROR_API_CONTRACT_V1.md) сохраняет старую v1 schema,
-  предлагает отдельный v2 и model B для review. Новые права/deployment
+  [Принятый P0 контракт](MIRROR_API_CONTRACT_V1.md) сохраняет старую v1 schema,
+  выбирает отдельный v2 и model B; реализация и activation остаются gated. Новые права/deployment
   требуют обычных UC-GW-003/005 и owner acceptance; backlog хранит gates.
 
 ## Browser UI — primary table + optional worktrees (2026-11-08 source candidate)
@@ -91,8 +91,8 @@ developer preview remains **strictly read-only** and denies browser Pull.
 The browser process uses reviewed source from the Windows primary
 clone and matching accepted exporters in Docker. [MANUAL-PREVIEW](MANUAL-PREVIEW.md)
 owns the command and checklist; no second copy is maintained here. PR/CI/branch
-reads use the existing Repo typed Gateway client and machine grant, never a
-Windows PAT fallback. Observed CI success does not certify the required gate.
+reads use the Windows owner's gh credential store, without a Gateway/PAT fallback.
+The Docker inventory still uses the accepted exporter. Observed CI success does not certify the required gate.
 
 ## Manual Windows Pull — owner-local Browser UI
 
@@ -100,7 +100,7 @@ On accepted Windows source (`Start-MirrorAPI.ps1`, normally via Script Center)
 select one Docker primary and click **Pull Windows**. The browser first retrieves
 a same-session CSRF token and POSTs `{}` to
 `/api/v1/repositories/<repo>/pull-preview`. The Windows API re-reads Docker,
-Windows and **fresh GitHub `main` via the existing typed Gateway reader**;
+Windows and **fresh GitHub `main` via Windows gh**;
 it accepts only matching registered clean Docker primary `main`, clean Windows
 primary `main` with the exact expected origin, and non-equal heads with no
 known ahead/diverged history. It requires Docker `main` == GitHub `main`.
@@ -153,7 +153,7 @@ at least one group is visible the Workflow conclusion/action remains visible.
 Every column has a draggable border and keyboard left/right resizing (12 px
 steps); double-click resets one column, **Сбросить ширину** resets all widths.
 Widths and group toggles are stored in browser-local `localStorage`, never in
-Git or Gateway; invalid/out-of-range persisted widths are rejected. Search and
+Git or GitHub; invalid/out-of-range persisted widths are rejected. Search and
 "Требуют внимания" are view-only and do not change the underlying rows or Git
 state. The GitHub check failure explicitly invalidates the corresponding
 row's remote freshness; local refresh intentionally marks remote data as not
@@ -167,20 +167,20 @@ header guidance lines are removed.
 The owner **«Проверить выбранный»** and **«Проверить все»** call the same
 CSRF-protected `POST /api/v1/repositories/<repo>/check-windows` for one or
 up to four repositories concurrently. For each repo, Docker inventory, Windows
-Git and a **fresh Gateway-verified GitHub `main` branch SHA** are checked.
+Git and a **fresh Windows-gh-verified GitHub `main` branch SHA** are checked.
 If Windows clean `main` differs from that SHA, the owner check may perform
 bounded `git fetch --no-tags --no-recurse-submodules origin main` in the Windows
 clone (45 s limit, no interactive credentials), **even if Docker main is behind
 GitHub**. This metadata-only observation independently requires the verified
-Windows clone/origin/main/clean state and exact fresh Gateway main; it proves
+Windows clone/origin/main/clean state and exact fresh GitHub main; it proves
 `FETCH_HEAD` equals the pinned SHA, rechecks Windows branch/HEAD/origin/clean,
 and reads `merge-base`. **Pull authorization has not been relaxed:** the fresh
 server Preview still requires registered clean Docker main at the exact GitHub
 main SHA, along with all Windows and origin/ancestry guards.
 
-When Docker primary main differs, the fast Gateway reader additionally uses
-bounded typed `list_commits` reads (at most three pages of 50) pinned by the
-first returned SHA to the separately verified GitHub `main`. Finding the exact
+When Docker primary main differs, the Windows reader additionally uses
+bounded GitHub commit reads (at most three pages of 50), with the captured
+GitHub main SHA supplied explicitly to the fixed commits endpoint. Finding the exact
 Docker SHA in this reachable history proves `Docker behind`; missing history,
 moving main or an out-of-window commit never proves `ahead` or `diverged`.
 Mirror may also inspect locally present Docker Git objects with read-only
@@ -190,21 +190,21 @@ specific Windows Pull blockers such as `DOCKER_MAIN_NOT_AT_GITHUB_MAIN`.
 
 **Local folder vs. GitHub repository:** the table, selected checks, Windows clone
 path, linked worktrees and Pull receipt retain the Docker primary folder name
-(`repoId`). The Gateway READ target is separately derived from the primary's
+(`repoId`). The Windows GitHub read identity is separately derived from the primary's
 actual `origin`, which must be a complete canonical HTTPS or SSH GitHub URL
 under the fixed trusted owner `AlexPastukhh`. Thus Docker `ai-conspects` may
 read GitHub `theory_conspects_and_banks` without renaming local folders or
 switching Git refs. The selected row explicitly shows the verified GitHub
 repository slug. Missing, foreign-owner, unrecognized or unsafe origins produce
-`ORIGIN_MISSING` / `ORIGIN_NOT_ALLOWED` and **never** issue a Gateway request.
+`ORIGIN_MISSING` / `ORIGIN_NOT_ALLOWED` and **never** issue a GitHub request.
 Windows origin must still equal the exact Docker origin, Windows main must be
 clean, and Pull still requires exact GitHub main, fresh server Preview,
 fast-forward proof, pinned SHA and durable receipt; origin mapping grants no
 new write route or automatic action.
 
 **Failures are observations, not successes:** a successful Browser HTTP response
-can still contain a denied or unavailable Gateway `main` read. The reader
-reports recognized Gateway statuses (for example `GATEWAY_HTTP_403`) as bounded
+can still contain a denied or unavailable Windows GitHub `main` read. The reader
+reports fixed GitHub statuses (for example `GITHUB_HTTP_403`) as bounded
 codes without raw provider errors, and never assumes why the 403 occurred.
 The browser names the failure in the GitHub column and lower details while
 blocking Pull. Owner check progress counts completed requests separately from
@@ -215,8 +215,8 @@ The check can update Git objects/FETCH_HEAD and possibly remote tracking refs,
 changed Windows status stays unknown, displays an explicit error and blocks
 Pull until fresh verification. A match needs no fetch; unsafe clones never fetch.
 Normal `GET /api/v1/repositories/<repo>?remote=true` remains read-only for
-callers and Pull post-result refresh. Developer-preview mode denies this POST. The fast Gateway reader calls typed `list_branches` plus bounded
-`list_commits` only for Docker-main discrepancies; it does not fetch closed PR
+callers and Pull post-result refresh. Developer-preview mode denies this POST. The fast Windows gh reader addresses main directly and reads bounded
+commit history only for Docker-main discrepancies; it does not fetch closed PR
 details, PR lists, workflow history or check runs. All local SHA, origin, clean, branch and
 ancestry checks, and owner-local Pull fresh Preview, are unchanged. In this
 mode PR and CI fields remain explicitly `UNVERIFIED` / `NOT_VERIFIED`, never
@@ -232,11 +232,11 @@ registered Docker worktree inventory**, preserving precise merged/unmerged
 provenance for visible worktrees without guessing the status of absent ones.
 Three independent read groups (branches, PR list, workflow runs) are issued
 concurrently; individual closed-PR detail reads are independently bounded to
-three. The Gateway remains the sole GitHub read source. Bulk deep inspection
+three. Windows gh is the browser's GitHub source; no Gateway fallback is used. Bulk deep inspection
 is explicitly denied; no PR or CI statuses are upgraded without evidence.
 
-The selected-row detail block reports Docker inventory, Windows Git, Gateway
-and ancestry read timings in milliseconds, plus the Gateway reader's per-stage
+The selected-row detail block reports Docker inventory, Windows Git, GitHub
+and ancestry read timings in milliseconds, plus the GitHub reader's per-stage
 durations. The check progress banner reports total elapsed time, while the selected row
 also exposes Windows fetch status/error and measured fetch time. Cancelling
 stops scheduling new checks, but cannot promise to abort an already running
@@ -254,7 +254,7 @@ in ~2.2 s with four concurrent Gateway requests **before Windows fetch was
 added**; that Gateway-only baseline is not the latency of the new owner check.
 A detailed Worktrees PR/CI
 read is intentionally slower, opt-in, and can return partial/unknown evidence
-if Gateway checks fail. No Git effects are ever performed by these reads.
+if GitHub checks fail. No Git effects are ever performed by these reads.
 
 
 The shared Windows Git observer now reads with the Windows owner's **effective
@@ -270,7 +270,7 @@ accepted on Windows, without overwriting live data.
 
 Optional listener requires a private Windows TLS key/cert, a 32+-character random service secret stored outside repositories with owner-only ACL, a protected durable receipt DB under `%LOCALAPPDATA%`, an explicit repo allowlist, and a Windows certificate chain trusted by the **Gateway container** for `host.docker.internal`. Use `--gateway-listen --gateway-bind <reviewed-interface> --gateway-port 443 --gateway-cert <cert.pem> --gateway-key <key.pem> --gateway-secret-file <owner-protected-path> --gateway-receipt-db <owner-protected-path> --gateway-repo <repoId>`. No listener is exposed by default. Do not bind `0.0.0.0` or open firewall access without an explicit owner/network review. TLS/credential installation is an owner task, not an AI task. The one service token authorizes Gateway↔Windows requests; it is **not** a GitHub provider token. Private Git fetch requires Windows Git's existing authorized credential, or a separately reviewed brokered Git transport; credentials are never copied from Gateway into Mirror.
 
-The shared Gateway Extension `JSONAPI` supports fixed HTTPS on port 443 with system-trusted certificate. No insecure fallback, direct AI-to-Windows bypass, arbitrary origin/port or token in caller payload is supported. Gateway config initially should contain the read operation only; add ASK Pull only after the owner confirms TLS/client identity, durable receipt behavior, exact approved merge evidence, Windows Git auth, and real fast-forward/reject/replay tests. Use the existing `Manage-Integrations.ps1` release controller; never redeploy Production as part of source testing.
+The shared Gateway Extension `JSONAPI` supports fixed HTTPS on port 443 with system-trusted certificate. No insecure fallback, direct AI-to-Windows bypass, arbitrary origin/port or token in caller payload is supported. Gateway config retains the legacy READ operation only. New ASK Pull requires P4's accepted signed dispatch, closed versioned provider and full owner acceptance under [the unified contract](MIRROR_API_CONTRACT_V1.md); do not activate the old Bearer-only POST. Use the existing `Manage-Integrations.ps1` release controller; never redeploy Production as part of source testing.
 
 ## GitHub Actions source checks
 

@@ -34,7 +34,7 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 
 ## API-first browser source (Windows owner acceptance is separate)
 
-The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). Its primary view now follows the WinForms-style **13-column Docker/GitHub/Windows repository table**, with a full-copyable **«Строка»** lower panel and an optional **«Worktrees»** lower table for the selected primary repository. It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub PR/CI through the authenticated native Gateway client in Docker (live token-scoped multi-repo access). The accepted Gateway Mirror provider supports only strict `get_repository` v1 READ (GitHub NOT_CHECKED); machine ASK Pull is absent. See [API-FIRST](docs/API-FIRST.md) for current source limits and [the proposed unified contract](docs/MIRROR_API_CONTRACT_V1.md) for P0 security review and versioned migration. Gateway ASK/WebAuthn/TLS and live Windows Pull acceptance are **pending**. Source includes an independent owner-local Browser Pull path with single-click exact-SHA preflight, not a Gateway ASK. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
+The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). Its primary view now follows the WinForms-style **13-column Docker/GitHub/Windows repository table**, with a full-copyable **«Строка»** lower panel and an optional **«Worktrees»** lower table for the selected primary repository. It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub main/PR/CI through Windows owner-managed gh. See [Windows GitHub reader](docs/WINDOWS-GITHUB-READ.md) for authentication, bounds and separate owner qualification. The accepted Gateway Mirror provider supports only strict `get_repository` v1 READ (GitHub NOT_CHECKED); machine ASK Pull is absent. See [API-FIRST](docs/API-FIRST.md) for current source limits and [the accepted P0 contract](docs/MIRROR_API_CONTRACT_V1.md) for versioned migration and subsequent activation gates. Gateway ASK/WebAuthn/TLS and live Windows Pull acceptance are **pending**. Source includes an independent owner-local Browser Pull path with single-click exact-SHA preflight, not a Gateway ASK. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
 
 ## Windows
 
@@ -49,20 +49,21 @@ Windows runtime requires `docker.exe`, `git.exe`, a running container called
 `fortis-repo-test`, and the matching Docker files at the path above.
 The launcher checks the Docker repo list on startup; GitHub and Windows
 checks happen only after clicking a check button. Browser **Check selected/all**
-uses an owner-session CSRF-protected POST: after the typed Gateway main read it
+uses an owner-session CSRF-protected POST: after the Windows gh main read it
 may fetch Windows `origin main` Git metadata for a clean registered checkout
 and prove ancestry. It never merges or checks out files. GET observations and
 Worktrees PR/CI detail reads remain read-only; only explicit Pull can fast-forward.
 
 ## GitHub publication and legacy compatibility
 
-GitHub PR/CI/main reads and Docker GitHub publication use the existing typed
-Fortis Gateway client, with provider credentials confined to Gateway. The
+Browser GitHub PR/CI/main reads use Windows gh authentication. Docker GitHub
+publication continues through the existing typed Fortis Gateway client, with
+its provider credentials confined to Gateway. The
 Browser UI offers one **owner-local Windows main Pull** route: protected
 Preview + single-click owner action with fresh exact-SHA preflight + restricted `PullWorker` (`git fetch` followed
 by `merge --ff-only` on the Windows receiver). This is not a GitHub PR/push route,
 not a Gateway ASK, and it never writes Docker Git state. Other Browser Git writes
-(Stage/Commit/Push) remain absent. Local Pull requires a fresh Gateway-read GitHub
+(Stage/Commit/Push) remain absent. Local Pull requires a fresh Windows-gh-read GitHub
 main, matching clean Docker main and clean Windows main, matching origin and
 verified fast-forward **after** fetching the pinned SHA. The retained
 WinForms source and `tools/Docker-Mirror-Git-Actions.py` still support local

@@ -4,14 +4,17 @@
 
 ## Unified Mirror API — P0 review (2026-11-15)
 
-[P0 contract/schemas](MIRROR_API_CONTRACT_V1.md) — PROPOSED, не реализация v2.
+[P0 contract/schemas](MIRROR_API_CONTRACT_V1.md) принят owner merge PR #23;
+UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализация v2.
 [Source/catalog review](unified-api/P0_SOURCE_REVIEW_2026-11-15.md) отделяет
 проверенные исходники от неподтверждённой установленной runtime.
 
-- P0: owner security review модели B, узкого делегирования UC-CONT-003,
-  closed schemas, v1 compatibility и стадий UC-GW-012; до принятия — DENY.
-- P1: Windows owner-managed Git/gh reader без Gateway fallback; Git/gh scopes
-  и browser main/PR/CI при отключённом Gateway подтвердить на Windows.
+- P0 source принят, модель B выбрана; реализация signing/key lifecycle и
+  machine activation остаются DENY до своих code/release/live gates.
+- P1 source: Windows gh reader без Gateway fallback, общий snapshot collector,
+  fixed GET/identity/pipe limits и regression fixtures. Подтвердить реальные
+  Git/GCM/gh scopes, browser main/PR/CI и независимость от Gateway на Windows
+  по [Windows GitHub reader](WINDOWS-GITHUB-READ.md), без остановки Gateway.
 - P2: один Core/worker/receipt и process guard; сохранить существующий общий
   browser check/Pull mutex, проверить crash/UNCERTAIN и все пути второго writer.
 - P3: typed v2 READ при сохранённом strict v1; отдельные source CI,

@@ -7,6 +7,8 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
+from .windows_github import OWNER as GITHUB_OWNER, snapshot as windows_github_snapshot
+
 REPO = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 CONTAINER = "fortis-repo-test"
@@ -122,7 +124,7 @@ def github_main(repo_id, origin, *, worktree_branches=None, details=True, main_a
     The remote identity comes only from Docker's actual origin, never a URL or
     repository supplied by the browser. Windows must match that exact origin.
     """
-    result = dict(source="fortis-gateway", checkedAt=checked_at(), repoId=repo_id,
+    result = dict(source="windows-gh", checkedAt=checked_at(), repoId=repo_id,
                   githubRepository=None, head=None, branches={}, pullRequests=None,
                   workflowRuns=None, checkRuns={}, readErrors={}, truncated={},
                   mainHistory=None, requiredCI="NOT_VERIFIED", error=None)
@@ -140,21 +142,22 @@ def github_main(repo_id, origin, *, worktree_branches=None, details=True, main_a
     ancestry_options = ({'main_ancestor_sha': main_ancestor_sha}
                         if main_ancestor_sha is not None else {})
     if not details:
-        # Fresh exact main via typed Gateway. PR/CI remain explicitly unknown;
+        # Fresh exact main via Windows gh. PR/CI remain explicitly unknown;
         # no stale cache or guessed merge evidence enters Pull authorization.
-        data = gateway_pr_ci(github_repo, main_only=True, **ancestry_options)
+        data = windows_github_snapshot(github_repo, main_only=True, **ancestry_options)
     else:
-        data = gateway_pr_ci(github_repo, **ancestry_options) if worktree_branches is None else gateway_pr_ci(
+        data = windows_github_snapshot(github_repo, **ancestry_options) if worktree_branches is None else windows_github_snapshot(
             github_repo, worktree_branches=worktree_branches, **ancestry_options)
     result.update(head=data["head"], branches=data["branches"],
                   pullRequests=data["pullRequests"], workflowRuns=data["workflowRuns"],
                   checkRuns=data["checkRuns"], readErrors=data["errors"],
                   truncated=data["truncated"],
-                  gatewayTimingsMs=data.get("timingsMs"),
+                  githubTimingsMs=data.get("timingsMs"),
+                  gatewayTimingsMs=data.get("timingsMs"),  # legacy browser diagnostic key
                   mainHistory=data.get("mainHistory"))
     if result["head"] is None:
-        result["error"] = next((data["errors"][key] for key in ("branches", "scope", "gateway")
-                                if key in data["errors"]), "GATEWAY_MAIN_UNVERIFIED")
+        result["error"] = next((data["errors"][key] for key in ("branches", "scope", "github")
+                                if key in data["errors"]), "GITHUB_MAIN_UNVERIFIED")
     return result
 
 
@@ -219,7 +222,11 @@ def worktree_pr_ci(worktree, github):
         return result_pr, result_ci
     matching = [pr for pr in prs if type(pr) is dict and
                 type(pr.get("head")) is dict and pr["head"].get("ref") == branch and
-                type(pr.get("base")) is dict and pr["base"].get("ref") == "main"]
+                type(pr.get("base")) is dict and pr["base"].get("ref") == "main" and
+                ("headRepository" not in pr or
+                 type(pr.get("headRepository")) is str and
+                 pr["headRepository"].casefold() ==
+                 (GITHUB_OWNER + "/" + str(github.get("githubRepository", ""))).casefold())]
     if not matching:
         result_pr["status"] = ("UNKNOWN_TRUNCATED" if github.get("truncated",{}).get("pullRequests")
                                else "NONE")
