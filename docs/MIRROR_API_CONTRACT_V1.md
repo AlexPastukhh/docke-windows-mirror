@@ -171,7 +171,8 @@ One writer coordinator serializes browser fetch/check/Pull and machine effects
 per clone; one process-instance guard prevents an independent second writer.
 Persist request identity before Git. SQLite receipt reservation alone is not
 proof that a process is quiescent. Existing in-process locks plus the current
-DISPATCHED guard require further crash/UNCERTAIN review in P2.
+DISPATCHED/UNCERTAIN guards require further process/crash review in P2.
+The browser recovery fix does not implement that independent process guard.
 
 Recheck owner-registered paths/origin, clean Windows main, expected HEAD, current
 GitHub main and Docker main. Then bounded exact main fetch; FETCH_HEAD must equal
@@ -186,8 +187,11 @@ REJECTED/EXPIRED/STALE/UNCERTAIN/REVOKED remain **Core states**, outside the
 upstream result. Core EXECUTED can describe a completed provider call whose
 Windows result is UNCERTAIN; clients must inspect both before claiming success.
 NOT_FOUND is not proof that an in-flight network dispatch cannot arrive later.
-FAILED means a known pre-effect refusal; ambiguous post-reservation errors are
-UNCERTAIN. ALREADY_CURRENT is a v2 outcome, not a current worker state.
+FAILED means a known pre-effect refusal or a completed pre-merge failure
+confirmed by clean-main/origin/HEAD readback. It does not claim that fetch wrote
+no Git metadata. Ambiguous post-reservation errors remain UNCERTAIN. A durable
+merge-start checkpoint prevents a post-merge failure being classified as a
+pre-merge failure. DISPATCHED is never completed from an intermediate readback. ALREADY_CURRENT is a v2 outcome, not a current worker state.
 
 After timeout or uncertain dispatch only lookup on the original UUID is allowed.
 Lookup may read Git and durably record a resolved outcome, but cannot fetch or

@@ -86,3 +86,37 @@ until those owner results exist. P2/live cutover follows the contract gates.
 Offline verification: `python3 -B -m unittest discover -q -p 'test_mirror*.py'`
 and `node --check mirror_api/static/app.js`. Fixtures execute no live GitHub
 or Gateway calls; subprocess limit tests run disposable local Python children.
+
+## Pull failure recovery — source follow-up 2026-11-16
+
+The ordinary selected/marked/all repository check remains available with an
+unresolved Pull. For its original requestId it reads the receipt and a fresh
+repository snapshot, without dispatching another fetch/merge. A still-unknown
+result shows the observed Windows HEAD, expected/target SHAs, observation time
+and available phase/reason; the table is refreshed even without convergence.
+There is no separate product button for checking a Pull result.
+
+A nonzero fetch exit before merge records only a fixed cause category and exit
+code, never raw stderr, URLs or credentials. Clean main, matching origin and an
+expected/target HEAD can establish FAILED after a known pre-merge failure. An
+old WINDOWS_FETCH_FAILED receipt can use the same read-only recovery, but its
+original fetch cause was not saved and cannot be reconstructed. FAILED permits
+a fresh explicit Preview; it never repeats the previous request automatically.
+Unknown/post-merge failures remain UNCERTAIN unless safe target readback proves
+convergence (evidence TARGET_READBACK). DISPATCHED stays reserved. New UUIDs for
+a clone with DISPATCHED/UNCERTAIN are denied, including another worker sharing
+the database. This is not the P2 process-instance guard or live qualification.
+
+After a server/session restart the browser cannot read the previous session's
+receipt. The stale UI reference is cleared only on PULL_RECEIPT_NOT_OWNED.
+Internal repository-scoped reconciliation exposes only blocked/pendingCount/
+checkedAt, never the old receipt or UUID. It fences both fresh Preview and
+owner metadata checks while an effect remains unresolved. The receipt database
+must be preserved. No deletion/edit of receipts or automatic retry is recovery.
+
+Owner Windows acceptance remains required after merge and an agreed source
+update/restart: verify an old fetch failure on unchanged HEAD clears via normal
+selected check, a genuine uncertain merge still blocks Pull, fresh facts appear,
+and the browser restart preserves both privacy and the unresolved-effect guard.
+For the reported old failure, fetch cause is unknown. A successful gh auth
+check proves REST identity only; it does not prove Git/GCM fetch authorization.

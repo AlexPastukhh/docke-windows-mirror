@@ -54,7 +54,7 @@ owner deployment records и условий cleanup.
    fast-forward ancestry, pin SHA и readback; без reset/stash/force. Mirror
    сам проверяет итоговый SHA и показывает receipt: после подтверждённого
    `EXECUTED` не просить дополнительный PowerShell/SHA readback в чате.
-   Если исход операции неясен, использовать Mirror `Проверить результат`
+   Если исход операции неясен, использовать Mirror `Проверить выбранный` (исходная квитанция + свежая строка)
    без повторного Pull. Не выполнять Windows sync только ради формального
    этапа при отсутствии Windows consumer. Source update не означает image
    build, deploy или restart: это отдельный owner-controlled процесс.

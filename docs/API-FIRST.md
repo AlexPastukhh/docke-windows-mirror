@@ -128,13 +128,19 @@ reconcile/read back the stored result. The worker makes three bounded **Git
 status readbacks only** after successful ff-only, never an additional fetch or
 merge. An unconfirmed receipt includes `readbackIssues` (HEAD, branch, dirty,
 origin, or Git error), without leaking file paths. The browser immediately
-re-reads the original receipt once, then offers **«Проверить результат
-предыдущего Pull»** as a read-only action with the original request UUID.
-An unresolved UUID is kept in tab `sessionStorage` across reloads (without
-credentials); the backend's session ownership remains memory-only and does
-**not** survive a Mirror service restart. After process restart, operator
-recovery must use the protected receipt DB, not a new Pull or a bypass of
-browser session binding. The browser preview is disabled whenever
+re-reads the original receipt once. **«Проверить выбранный»** then reconciles the
+original request UUID and refreshes the repository row even while UNCERTAIN;
+recovery does not fetch/merge. Known pre-merge failures with safe readback become
+FAILED, with phase and a fixed fetch cause/exit code when available. New UUIDs
+remain blocked while DISPATCHED/UNCERTAIN. Target readback records convergence
+evidence, not exclusive causation. See [recovery details](WINDOWS-GITHUB-READ.md#pull-failure-recovery--source-follow-up-2026-11-16).
+An unresolved UUID is kept in tab sessionStorage across reloads without
+credentials. Backend session ownership is memory-only and does not survive a
+service restart. A precise ownership refusal clears the stale browser binding;
+internal repo-scoped recovery exposes only a safety summary, never another
+session's receipt. Unknown outcomes continue to block Preview and metadata
+fetch. Preserve the protected receipt DB; no automatic replay or ownership bypass.
+The browser preview is disabled whenever
 `--preview-source-task` is used. When the separate Gateway listener is enabled,
 it uses the **same worker and receipt database** as owner-local Pull.
 

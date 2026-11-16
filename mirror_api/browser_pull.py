@@ -57,6 +57,11 @@ class BrowserPull:
             if item['time'] + self.STATUS_SECONDS < now:
                 del self.requests[key]
 
+    def safety(self, repo_id):
+        if not self.configured:
+            return {'blocked': False, 'pendingCount': 0}
+        return self._worker().safety(repo_id)
+
     def preview(self, repo_id, session):
         if type(repo_id) is not str or not REPO.fullmatch(repo_id) or not session:
             raise PullDenied('REPOSITORY_NOT_ALLOWED')
@@ -71,7 +76,7 @@ class BrowserPull:
         primary = row.get('docker', {}).get('primary') or {}
         windows = row.get('windows') or {}
         github = row.get('github') or {}
-        reasons = []
+        reasons = ['PREVIOUS_PULL_UNRESOLVED'] if self.safety(repo_id)['blocked'] else []
         if (primary.get('kind') != 'primary' or primary.get('branch') != 'main' or
                 primary.get('targetEligible') is not True or
                 primary.get('status') != 'registered' or primary.get('clean') is not True):

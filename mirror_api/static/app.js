@@ -228,22 +228,21 @@ function renderPullState() {
   const pending = pendingPulls.get(active);
   const message = pullMessages.get(active) || (pending ?
     'Есть неподтверждённый Pull для ' + active + ' · Request ID: ' + pending.requestId +
-    '. Используйте «Проверить результат»; новый Pull не запускайте.' : '');
+    '. Нажмите «Проверить выбранный» для обновления состояния.' : '');
   $('pull-result').textContent = message;
   $('pull-result').hidden = !message;
-  $('receipt-controls').hidden = !pending;
-  $('check-pull-result').disabled = !pending || readbackBusyRepos.has(active) || pullBusyRepos.has(active);
 }
 function pullEligible(row) {
   return !!(row && row.actions && row.actions.pull_main_browser &&
-    row.actions.pull_main_browser.available === true && !row.remoteCheckError);
+    row.actions.pull_main_browser.available === true && !row.remoteCheckError && !row.pullSafety?.blocked);
 }
 
 
 const PULL_BLOCKER_TEXT = {
   DOCKER_MAIN_NOT_VERIFIED: 'Docker primary main не подтверждён как чистый и зарегистрированный',
   DOCKER_MAIN_NOT_AT_GITHUB_MAIN: 'Docker main не совпадает с GitHub main; сначала обновите Docker main штатным Gateway workflow',
-  GITHUB_MAIN_UNVERIFIED: 'GitHub main не подтверждён Gateway',
+  GITHUB_MAIN_UNVERIFIED: 'GitHub main не подтверждён',
+  PREVIOUS_PULL_UNRESOLVED: 'Результат предыдущего Pull не определён; проверьте выбранный репозиторий',
   WINDOWS_ORIGIN_NOT_VERIFIED: 'Windows origin / Git-клон не подтверждён',
   WINDOWS_NOT_ON_MAIN: 'Windows не на активной ветке main',
   WINDOWS_NOT_CLEAN: 'В Windows есть незакоммиченные изменения или состояние не подтверждено',
@@ -254,6 +253,7 @@ const PULL_BLOCKER_TEXT = {
   WINDOWS_FETCHED_MAIN_CHANGED: 'GitHub main изменился во время Windows fetch — повторите проверку',
 };
 function pullBlockers(row) {
+  if (row?.pullSafety?.blocked) return PULL_BLOCKER_TEXT.PREVIOUS_PULL_UNRESOLVED;
   if (!row || !row.actions || !row.actions.pull_main_browser) return 'Сначала выполните проверку выбранного репозитория';
   const action = row.actions.pull_main_browser;
   if (action.available === true) return 'Предварительные условия выполнены; окончательное разрешение только после свежего Preview';
@@ -556,8 +556,8 @@ function updateControls() {
   const busy = pullBusyRepos.has(active) || readbackBusyRepos.has(active);
   $('local').disabled = localBusy;
   $('remote').disabled = !rows.length;
-  $('selected-remote').disabled = !row || checkingClone || busy || pending;
-  $('check-worktree-details').disabled = !row || !!job || busy || pending;
+  $('selected-remote').disabled = !row || checkingClone || busy;
+  $('check-worktree-details').disabled = !row || !!job || busy;
   $('marked-remote').disabled = ![...markedRepos].some(name => rows.some(row => row.repoId === name));
   $('mark-visible').disabled = !selectedVisibleRepos().length;
   $('clear-marked').disabled = !markedRepos.size;
@@ -567,7 +567,6 @@ function updateControls() {
   $('pull-windows').title = !browserPullEnabled ? 'Локальный Windows Pull не настроен' :
     pending ? 'Сначала проверьте результат Pull этого репозитория' :
       checkingClone ? 'Пока выполняется Windows fetch для этого репозитория' : pullBlockers(row);
-  $('check-pull-result').disabled = !pending || busy || checkingClone;
   $('cancel').disabled = !repoChecks.size;
 }
 function replaceRows(items, observedVersions = null) {
@@ -621,7 +620,7 @@ function pumpCheckQueue() {
     if (pos < 0) break;
     const [job] = checkQueue.splice(pos, 1);
     // Pull of this clone may have begun while the check was waiting.
-    if (pullBusyRepos.has(job.name) || pendingPulls.has(job.name)) {
+    if (pullBusyRepos.has(job.name)) {
       finishCheckJob(job);
       continue;
     }
@@ -633,7 +632,22 @@ function pumpCheckQueue() {
       try {
         const endpoint = '/api/v1/repositories/' + encodeURIComponent(job.name);
         const signal = job.controller.signal;
-        const response = job.details ?
+        const saved = pendingPulls.get(job.name);
+        // Recovery observes the original receipt and snapshot, never Git fetch.
+        // Server-side fencing also covers an owner session restart.
+        if (saved) {
+          try { await reconcilePullResult(saved, {refresh: false}); }
+          catch (error) {
+            if (error.message === 'PULL_RECEIPT_NOT_OWNED') {
+              clearPendingPull(job.name);
+              showPullResult('Сессия предыдущего Pull завершилась. Обновляю состояние репозитория; безопасность нового Pull проверяется сервером.', job.name);
+            } else showPullResult('Результат Pull недоступен: ' + error.message +
+              '. Обновляю состояние репозитория.', job.name);
+          }
+        }
+        if (signal.aborted) return;
+        const response = saved ?
+          await fetch(endpoint + (job.details ? '?remote=details' : '?remote=true'), {cache:'no-store', signal}) : job.details ?
           await fetch(endpoint + '?remote=details', {cache: 'no-store', signal}) :
           await fetch(endpoint + '/check-windows', {method:'POST', cache:'no-store', signal,
             headers:{'Content-Type':'application/json', 'X-CSRF-Token': await job.csrf}, body:'{}'});
@@ -710,7 +724,7 @@ async function checkRemote(mode = 'one', details = false) {
       batch.skipped++;
       continue;
     }
-    if (pullBusyRepos.has(name) || pendingPulls.has(name)) {batch.skipped++;continue;}
+    if (pullBusyRepos.has(name) || readbackBusyRepos.has(name)) {batch.skipped++;continue;}
     let resolve;
     const done = new Promise(end => {resolve = end;});
     const job = {name,details,csrf:null,batch,controller:new AbortController(),
@@ -768,13 +782,29 @@ const READBACK_LABELS = {
   BRANCH_MISMATCH: 'Не та ветка Windows', WORKTREE_NOT_CLEAN: 'Git видит локальные изменения',
   ORIGIN_MISMATCH: 'Origin не подтверждён'
 };
+const FETCH_CAUSES = {
+  GIT_AUTH_REQUIRED: 'Git требует авторизацию', GIT_TLS_FAILED: 'Ошибка сертификата Git',
+  GIT_NETWORK_FAILED: 'Git не смог подключиться к серверу', GIT_LOCKED: 'Git заблокирован другим процессом',
+  GIT_REMOTE_UNAVAILABLE: 'Git remote недоступен', GIT_LOCAL_ACCESS_DENIED: 'Git не может прочитать или записать локальные файлы',
+  GIT_FETCH_FAILURE_UNCLASSIFIED: 'Причина fetch не распознана',
+  FETCH_REASON_NOT_RECORDED: 'Старый worker не сохранил причину fetch'
+};
 function receiptMessage(receipt) {
   const issues = Array.isArray(receipt.readbackIssues) ? receipt.readbackIssues : [];
   const detail = issues.map(key => READBACK_LABELS[key] || key).join('; ');
-  return 'Результат предыдущего Pull пока не подтверждён (' + show(receipt.state) +
-    ', ' + show(receipt.error) + ')' + (detail ? '. Проверка: ' + detail : '') +
-    '. Request ID: ' + show(receipt.requestId) +
-    '. Git не запускается повторно; нажмите «Проверить результат».';
+  const observed = receipt.observation;
+  const diagnostic = receipt.diagnostic;
+  const facts = observed ? '. Windows SHA: ' + show(observed.head) +
+    '; ожидался: ' + show(receipt.expectedHead) + '; цель: ' + show(receipt.targetSha) +
+    '; проверено: ' + show(observed.checkedAt) +
+    (observed.error ? '; ' + observed.error : '') : '';
+  const cause = diagnostic ? '. ' + (FETCH_CAUSES[diagnostic.cause] || diagnostic.cause) +
+    (diagnostic.exitCode === null ? '' : ' (exit ' + diagnostic.exitCode + ')') : '';
+  return (receipt.state === 'FAILED' ? 'Pull завершился ошибкой до merge' : 'Результат Pull пока не определён') +
+    ' (' + show(receipt.state) + ', ' + show(receipt.error) + ')' +
+    (receipt.phase ? '. Этап: ' + receipt.phase : '') + cause + facts +
+    (detail ? '. Проверка: ' + detail : '') + '. Request ID: ' + show(receipt.requestId) +
+    '. «Проверить выбранный» обновляет состояние; Pull автоматически не повторяется.';
 }
 async function readPullReceipt(repo, requestId) {
   return jsonResponse(await fetch('/api/v1/repositories/' + encodeURIComponent(repo) +
@@ -816,37 +846,28 @@ function pullTimingSummary(previewTimings, receiptTimings, elapsed) {
     parts.unshift('От нажатия до подтверждения: ' + elapsed + ' мс');
   return parts.length ? '\nВремя Pull (этапы перекрываются с общим): ' + parts.join(' · ') : '';
 }
-async function reconcilePullResult(saved, {previewTimings = null, startedAt = null} = {}) {
+async function reconcilePullResult(saved, {previewTimings = null, startedAt = null, refresh = true} = {}) {
   const receipt = await readPullReceipt(saved.repo, saved.requestId);
   if (receipt.state === 'EXECUTED' && receipt.head === saved.targetSha) {
     clearPendingPull(saved.repo);
-    const confirmed = 'Windows Pull подтверждён: ' + saved.repo + ' → ' + saved.targetSha +
+    const confirmed = (receipt.evidence === 'TARGET_READBACK' ? 'Windows находится на целевом SHA: ' : 'Windows Pull подтверждён: ') + saved.repo + ' → ' + saved.targetSha +
       '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.' +
       pullTimingSummary(previewTimings, receipt.timingsMs,
         startedAt === null ? null : Date.now() - startedAt);
     showPullResult(confirmed, saved.repo);
     // The receipt has already proven success. A fresh, read-only table refresh
     // may take seconds through Gateway; it must not keep Pull "in progress".
-    refreshRepository(saved.repo).catch(() => {
+    if (refresh) refreshRepository(saved.repo).catch(() => {
       showPullResult(confirmed + ' Обновление таблицы не удалось; нажмите «Проверить выбранный».', saved.repo);
     });
     return true;
   }
+  if (receipt.state === 'FAILED') clearPendingPull(saved.repo);
   showPullResult(receiptMessage(receipt), saved.repo);
+  if (refresh) refreshRepository(saved.repo).catch(error => {
+    showPullResult(receiptMessage(receipt) + ' Обновление таблицы недоступно: ' + error.message, saved.repo);
+  });
   return false;
-}
-async function verifyPullResult() {
-  const repo = active;
-  const saved = pendingPulls.get(repo);
-  if (!saved || pullBusyRepos.has(repo) || readbackBusyRepos.has(repo) || repoChecks.get(repo)?.started) return;
-  readbackBusyRepos.add(repo);
-  updateControls();
-  showPullResult('Читаю сохранённый результат Pull ' + saved.requestId + ' без нового Git…', repo);
-  try { await reconcilePullResult(saved); }
-  catch (error) {
-    showPullResult('Результат Pull пока недоступен: ' + error.message +
-      '. Нажмите «Проверить результат»; Git не запускается. Request ID: ' + saved.requestId, repo);
-  } finally { readbackBusyRepos.delete(repo); render(); }
 }
 async function pullWindows() {
   const repo = active;
@@ -873,7 +894,10 @@ async function pullWindows() {
     previewTimings = preview.timingsMs || null;
     if (!preview.available) {
       showPullResult('Pull Windows main недоступен для ' + repo + ': ' +
-        (preview.reasons || []).join(', ') + '. Git не изменён.', repo);
+        (preview.reasons || []).map(key => PULL_BLOCKER_TEXT[key] || key).join('; ') +
+        '. Проверка Preview: Docker ' + show(preview.dockerHead) + '; GitHub ' + show(preview.targetSha) +
+        '; Windows ' + show(preview.windowsHead) + '. Git не изменён.', repo);
+      refreshRepository(repo).catch(() => {});
       return;
     }
     requestId = preview.requestId;
@@ -910,7 +934,7 @@ async function pullWindows() {
       } catch (ignored) { observed = '. Receipt пока недоступен'; }
     }
     showPullResult('Pull Windows для ' + repo + ': ' + error.message + observed +
-      (requestId ? '. Нажмите «Проверить результат»; повторный Pull не запускайте. Request ID: ' + requestId :
+      (requestId ? '. Нажмите «Проверить выбранный»; повторный Pull не запускайте. Request ID: ' + requestId :
         '. Git не запускался через этот запрос.'), repo);
   } finally {
     pullBusyRepos.delete(repo);
@@ -925,7 +949,6 @@ $('toggle-windows').onclick = () => {layout.windows = !layout.windows; applyLayo
 $('reset-columns').onclick = () => {layout.widths = [...DEFAULT_WIDTHS]; applyLayout(); saveLayout();};
 $('repo-filter').oninput = render;
 $('only-attention').onchange = render;
-$('check-pull-result').onclick = verifyPullResult;
 $('local').onclick = loadLocal;
 $('remote').onclick = () => checkRemote('all');
 $('marked-remote').onclick = () => checkRemote('marked');

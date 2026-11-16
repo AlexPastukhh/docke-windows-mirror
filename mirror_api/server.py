@@ -149,7 +149,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = self.server.mirror.inventory(remote=url.query in ("remote=true", "remote=details"),
                     repo=name, **({"details": True} if url.query == "remote=details" else {}))
-            except ObservationError as exc:
+                if data['repositories'] and self.server.allow_browser_pull:
+                    data['repositories'][0]['pullSafety'] = self.server.browser_pull.safety(name)
+            except (ObservationError, PullDenied) as exc:
                 self.send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
                 return
             if not data["repositories"]:
@@ -266,11 +268,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not worker_lock.acquire(blocking=False):
                     raise PullDenied('REPOSITORY_OPERATION_PENDING')
                 try:
-                    data = self.server.mirror.check_repository(repo_id)
+                    safety = self.server.browser_pull.safety(repo_id)
+                    # An unresolved effect permits observation, never another
+                    # metadata fetch, including after owner session restart.
+                    data = (self.server.mirror.inventory(remote=True, repo=repo_id) if safety['blocked']
+                            else self.server.mirror.check_repository(repo_id))
                     if len(data.get('repositories', [])) != 1 or data['repositories'][0].get('repoId') != repo_id:
                         raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
                     result = {"schemaVersion": 1, "checkedAt": data['checkedAt'],
                               "repository": data['repositories'][0]}
+                    result['repository']['pullSafety'] = safety
                 finally:
                     worker_lock.release()
             elif action == "pull-preview":

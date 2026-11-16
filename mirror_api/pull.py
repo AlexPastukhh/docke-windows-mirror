@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 from .operations import ObservationError, SHA, checked_at, git, github_main, windows_status, docker_inventory
+from .git_errors import fetch_failure
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 
@@ -27,6 +28,12 @@ class PullReadbackUnconfirmed(ObservationError):
     def __init__(self, issues):
         super().__init__('WINDOWS_READBACK_UNCONFIRMED')
         self.issues = issues
+
+
+class PullFetchFailed(ObservationError):
+    def __init__(self, result):
+        super().__init__('WINDOWS_FETCH_FAILED')
+        self.diagnostic = fetch_failure(result.stderr, result.returncode)
 
 
 class PullWorker:
@@ -43,7 +50,7 @@ class PullWorker:
         # Clone-specific serialization: independent Windows primaries can Pull
         # simultaneously, while the same primary is never executed twice.
         with self.lock:
-            return self.repo_locks.setdefault(repo, threading.Lock())
+            return self.repo_locks.setdefault(repo, threading.RLock())
 
     def _db(self):
         db = sqlite3.connect(str(self.path), timeout=15)
@@ -81,25 +88,76 @@ class PullWorker:
         original = json.loads(payload)
         if repo_id is not None and original["repoId"] != repo_id:
             raise PullDenied("RECEIPT_REPOSITORY_MISMATCH")
-        if state in ("DISPATCHED", "UNCERTAIN"):
-            # No new Git effect: reconcile an ambiguous result against its
-            # original target. On mismatch remain uncertain (never retry).
-            observed = windows_status(self.mirror.windows_root, original["repoId"], original["origin"])
-            if (observed["error"] is None and observed["head"] == original["targetSha"] and
-                    observed["branch"] == "main" and observed["clean"] is True and
-                    observed["originValid"]):
-                receipt = {"requestId": request_id, "state": "EXECUTED",
-                           "head": original["targetSha"], "checkedAt": checked_at()}
-                if saved:
-                    previous = json.loads(saved)
-                    if type(previous) is dict and type(previous.get('timingsMs')) is dict:
-                        receipt['timingsMs'] = previous['timingsMs']
+        receipt = json.loads(saved) if saved else {'requestId': request_id, 'state': state, 'head': None}
+        if state not in ('UNCERTAIN', 'FAILED'):
+            return receipt
+        lock = self._repo_lock(original['repoId'])
+        if not lock.acquire(blocking=False):
+            return {**receipt, 'workerActive': True}
+        try:
+            try:
+                observed = windows_status(self.mirror.windows_root, original['repoId'], original['origin'])
+                observation = {key: observed.get(key) for key in ('head', 'branch', 'clean', 'originValid', 'error')}
+            except (ObservationError, OSError):
+                observation = {'head': None, 'branch': None, 'clean': None,
+                               'originValid': False, 'error': 'WINDOWS_READ_UNAVAILABLE'}
+            observation['checkedAt'] = checked_at()
+            result = {**receipt, 'observation': observation, 'expectedHead': original['expectedHead'],
+                      'targetSha': original['targetSha']}
+            safe = (not observation['error'] and observation['branch'] == 'main' and
+                    observation['clean'] is True and observation['originValid'] is True)
+            # The historical fixed FETCH_FAILED code is emitted before merge
+            # in all retained workers. It is not evidence about raw fetch cause.
+            before_merge = (receipt.get('error') == 'WINDOWS_FETCH_FAILED' or
+                receipt.get('workerFinished') is True and receipt.get('mergeStarted') is False and
+                receipt.get('knownFailure') is True)
+            if state == 'UNCERTAIN' and before_merge and safe and observation['head'] in (
+                    original['expectedHead'], original['targetSha']):
+                result.update(state='FAILED', head=observation['head'], phase=receipt.get('phase', 'FETCH'),
+                              evidence='PRE_MERGE_FAILURE_AND_READBACK',
+                              checkoutChanged=observation['head'] != original['expectedHead'])
+                if receipt.get('error') == 'WINDOWS_FETCH_FAILED':
+                    result.setdefault('diagnostic', {'cause': 'FETCH_REASON_NOT_RECORDED', 'exitCode': None})
+            elif state == 'UNCERTAIN' and not before_merge and safe and observation['head'] == original['targetSha']:
+                result.update(state='EXECUTED', head=observation['head'], evidence='TARGET_READBACK')
+            if result['state'] != state:
+                result['previousState'] = state
+                result['checkedAt'] = observation['checkedAt']
                 with self._db() as db:
-                    db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=? AND state IN ('DISPATCHED','UNCERTAIN')",
-                               ("EXECUTED", json.dumps(receipt, sort_keys=True), request_id))
-                return receipt
-        return json.loads(saved) if saved else {"requestId": request_id, "state": state,
-                                                "head": None}
+                    changed = db.execute('UPDATE pull_receipts SET state=?,result=? WHERE request_id=? AND state=? AND result IS ?',
+                        (result['state'], json.dumps(result, sort_keys=True), request_id, state, saved)).rowcount
+                if not changed:
+                    return self.status(request_id, repo_id=repo_id)
+            return result
+        finally:
+            lock.release()
+
+    def _pending(self, repo_id):
+        selected = []
+        with self._db() as db:
+            for index, row in enumerate(db.execute("SELECT request_id,payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')")):
+                if index >= 4096:
+                    raise PullDenied('PULL_HISTORY_LIMIT_REACHED')
+                if json.loads(row[1])['repoId'] == repo_id:
+                    selected.append(row[0])
+        return selected
+
+    def safety(self, repo_id):
+        # Internal repo-scoped recovery exposes no old-session receipt/UUID.
+        pending = self._pending(repo_id)
+        for ident in pending[:64]:
+            self.status(ident, repo_id=repo_id)
+        remaining = self._pending(repo_id)
+        return {'blocked': bool(remaining), 'pendingCount': len(remaining), 'checkedAt': checked_at()}
+
+    def _checkpoint(self, value, phase, merge_started):
+        progress = {'requestId': value['requestId'], 'state': 'DISPATCHED', 'head': None,
+                    'phase': phase, 'mergeStarted': merge_started}
+        with self._db() as db:
+            changed = db.execute("UPDATE pull_receipts SET result=? WHERE request_id=? AND state='DISPATCHED'",
+                (json.dumps(progress), value['requestId'])).rowcount
+        if changed != 1:
+            raise PullDenied('PULL_RECEIPT_RESERVATION_REQUIRED')
 
     def run(self, body, *, repo_id, allowed_repos):
         value = self.payload(body)
@@ -116,14 +174,18 @@ class PullWorker:
                 if row:
                     if row[0] != frozen:
                         raise PullDenied("REQUEST_ID_CONFLICT")
-                    return self.status(value["requestId"], repo_id=repo_id)
-                # A separate Mirror process using the same receipt DB must not
-                # start another Pull on this clone while the first is dispatched.
-                pending = db.execute("SELECT payload FROM pull_receipts WHERE state='DISPATCHED'").fetchall()
-                if any(json.loads(item[0])["repoId"] == repo_id for item in pending):
-                    raise PullDenied("REPOSITORY_OPERATION_PENDING")
-                db.execute("INSERT INTO pull_receipts VALUES(?,?,?,?)",
-                           (value["requestId"], frozen, "DISPATCHED", None))
+                else:
+                    # A separate Mirror process using the same receipt DB must not
+                    # start another Pull on this clone while the first is dispatched.
+                    pending = db.execute("SELECT payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')").fetchall()
+                    if any(json.loads(item[0])["repoId"] == repo_id for item in pending):
+                        raise PullDenied("REPOSITORY_OPERATION_PENDING")
+                    progress = {'requestId': value['requestId'], 'state': 'DISPATCHED', 'head': None,
+                                'phase': 'PRECHECK', 'mergeStarted': False}
+                    db.execute("INSERT INTO pull_receipts VALUES(?,?,?,?)",
+                               (value["requestId"], frozen, "DISPATCHED", json.dumps(progress)))
+            if row:
+                return self.status(value["requestId"], repo_id=repo_id)
             timings = {}
             started = time.perf_counter()
             try:
@@ -133,6 +195,13 @@ class PullWorker:
                 # Never retry it automatically. Readback/reconcile may resolve it.
                 receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
                            "head": None, "error": str(exc), "checkedAt": checked_at()}
+                with self._db() as db:
+                    progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                                     (value['requestId'],)).fetchone()[0])
+                receipt.update(phase=progress['phase'], mergeStarted=progress['mergeStarted'],
+                               workerFinished=True, knownFailure=not isinstance(exc, PullReadbackUnconfirmed))
+                if isinstance(exc, PullFetchFailed):
+                    receipt['diagnostic'] = exc.diagnostic
                 if isinstance(exc, PullReadbackUnconfirmed):
                     receipt['readbackIssues'] = exc.issues
             except Exception:
@@ -145,7 +214,8 @@ class PullWorker:
             with self._db() as db:
                 db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=?",
                            (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
-            return receipt
+            # Readback can confirm a pre-merge failure, but never dispatch Git.
+            return self.status(value['requestId'], repo_id=repo_id) if receipt['state'] == 'UNCERTAIN' else receipt
 
     def _confirmed_readback(self, repo, origin, target):
         """Retry only Git observation after a successful ff-only; never Git write.
@@ -211,6 +281,7 @@ class PullWorker:
             raise PullDenied("GITHUB_MAIN_CHANGED")
         # A GitHub credential, if needed, must already be configured for this
         # Windows clone. Never accept one in the request or read Gateway secrets.
+        self._checkpoint(p, 'FETCH', False)
         fetched = measured('windowsFetch', lambda: subprocess.run(
                 ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                  "-c", "protocol.file.allow=never", "-C", str(root), "fetch", "--no-tags",
@@ -218,7 +289,7 @@ class PullWorker:
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=180, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")))
         if fetched.returncode:
-            raise ObservationError("WINDOWS_FETCH_FAILED")
+            raise PullFetchFailed(fetched)
         fetched_head = measured('fetchHeadRead',
             lambda: git(root, "rev-parse", "--verify", "FETCH_HEAD"))
         if fetched_head != p["targetSha"]:
@@ -236,6 +307,7 @@ class PullWorker:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10))
         if ancestry.returncode:
             raise PullDenied("NOT_FAST_FORWARD")
+        self._checkpoint(p, 'MERGE', True)
         update = measured('fastForward', lambda: subprocess.run(
                 ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                  "-c", "protocol.file.allow=never", "-C", str(root), "merge", "--ff-only",
@@ -243,6 +315,7 @@ class PullWorker:
                 stderr=subprocess.PIPE, timeout=180))
         if update.returncode:
             raise ObservationError("WINDOWS_FF_FAILED")
+        self._checkpoint(p, 'READBACK', True)
         measured('windowsReadback',
             lambda: self._confirmed_readback(repo, origin, p["targetSha"]))
         return {"requestId": p["requestId"], "state": "EXECUTED",

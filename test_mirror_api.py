@@ -532,7 +532,8 @@ class DurablePullTests(unittest.TestCase):
             first = self.worker.run(self.payload, repo_id='fixture', allowed_repos={'fixture'})
             second = self.worker.run(self.payload, repo_id='fixture', allowed_repos={'fixture'})
         self.assertEqual('UNCERTAIN', first['state'])
-        self.assertEqual(first, second)
+        self.assertEqual((first['state'],first['error'],first['requestId']),
+                         (second['state'],second['error'],second['requestId']))
         worker.assert_called_once()
         with self.assertRaisesRegex(PullDenied, 'REQUEST_ID_CONFLICT'):
             self.worker.run({**self.payload,'targetSha':'c'*40}, repo_id='fixture', allowed_repos={'fixture'})
@@ -675,7 +676,7 @@ class RealGitFastForwardFixture(unittest.TestCase):
             self.assertEqual(1,len(fetches))
 
 class PullReconcileTests(unittest.TestCase):
-    def test_uncertain_receipt_can_be_proven_without_new_fetch(self):
+    def test_known_pre_merge_failure_can_be_resolved_without_new_fetch(self):
         from mirror_api.pull import PullWorker
         with tempfile.TemporaryDirectory() as folder:
             worker=PullWorker(Mirror(Path(folder)/'Repos'),Path(folder)/'state.sqlite')
@@ -689,8 +690,10 @@ class PullReconcileTests(unittest.TestCase):
             with mock.patch('mirror_api.pull.windows_status',return_value=proof), \
                  mock.patch.object(worker,'_execute') as no_execute:
                 result=worker.status(value['requestId'])
-                self.assertEqual('EXECUTED',result['state'])
-                self.assertEqual(result,worker.run(value,repo_id='fixture',allowed_repos={'fixture'}))
+                self.assertEqual('FAILED',result['state'])
+                replay=worker.run(value,repo_id='fixture',allowed_repos={'fixture'})
+                self.assertEqual(result['state'],replay['state'])
+                self.assertEqual(result['evidence'],replay['evidence'])
                 no_execute.assert_not_called()
 
 class GatewayAuthenticatedRoutes(unittest.TestCase):
