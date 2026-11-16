@@ -448,6 +448,11 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'));
   assert.match(elements['pull-result'].textContent,/Сессия предыдущего Pull завершилась/);
   assert.equal(elements['pull-windows'].disabled,true,'Server safety survives stale session cleanup');
+  assert.match(elements['row-full'].textContent,/PULL: НЕТ ПОДТВЕРЖДЕНИЯ/);
+  assert.match(elements['row-full'].textContent,/Ручной Windows Pull \(оценка\): заблокирован предыдущим Pull/);
+  assert.ok(!elements['row-full'].textContent.includes('можно запросить свежий Preview'));
+  assert.ok(!elements['row-full'].textContent.includes('Workflow · Итог: ТРЕБУЕТ ПРОВЕРКИ'));
+  assert.match(elements['pull-windows'].title,/Новый Pull заблокирован/);
   assert.match(elements['pull-windows'].title,/предыдущего Pull/);
   // Known fetch failure shows its category and fresh facts, never auto-retries.
   vm.runInContext('rememberPendingPull(pendingB.repo,pendingB.requestId,pendingB.targetSha)',sandbox);

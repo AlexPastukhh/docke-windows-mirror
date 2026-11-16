@@ -242,3 +242,7 @@ onboarding reproducibility, not to validate this Mirror installation.
 
 [own-api]: https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/own-api.md#uc-gw-012
 [delivery]: https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md
+
+## Legacy preflight receipt recovery — source follow-up 2026-11-16
+
+Known legacy GITHUB_MAIN_CHANGED is a pre-fetch refusal in every retained worker. A completed UNCERTAIN receipt with no conflicting progress may therefore resolve to FAILED after safe clean-main/origin/valid-HEAD observation, including at a later HEAD outside its stale payload. Record PRECHECK_REFUSAL_AND_READBACK, preserve the original error, and never claim that a later target readback was the refused operation. DISPATCHED, contradictory progress and unknown effects do not receive this exception. Browser safety remains aggregate-only across sessions; no principal-bound receipt access is widened.

@@ -123,3 +123,9 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
 - Автоматизировать source/static tests и безопасный Windows compile preflight; не имитировать Windows WinForms и файловые ACL внутри Linux. Host-only команды через общий UC-CONT-025.
 
 Точные источники: [`docs/WORKFLOW.md`](WORKFLOW.md), `Fortis-Windows-Mirror-Status.ps1`, [`README.md`](../README.md). Незавершённые task branches и не принадлежащие задаче изменения сохранять без stash/reset. Дальнейший API-first релиз проверять по отдельным owner-evidence.
+
+## Legacy preflight receipt recovery — source follow-up 2026-11-16
+
+- Подтверждённый legacy GITHUB_MAIN_CHANGED без checkpoints: FAILED по известному отказу до fetch и безопасному readback, в том числе после перехода Windows на третий SHA.
+- Одна блокировка в итоговом статусе, оценке Preview и кнопке Pull; число незавершённых операций видно в деталях.
+- Негативные fixtures сохраняют DISPATCHED/unknown/merge/unsafe readback и session ownership. Owner Windows acceptance остаётся отдельным этапом; P2 process guard не реализован этим исправлением.
