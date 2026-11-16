@@ -105,13 +105,28 @@ class PullWorker:
             result = {**receipt, 'observation': observation, 'expectedHead': original['expectedHead'],
                       'targetSha': original['targetSha']}
             safe = (not observation['error'] and observation['branch'] == 'main' and
-                    observation['clean'] is True and observation['originValid'] is True)
+                    observation['clean'] is True and observation['originValid'] is True and
+                    type(observation['head']) is str and SHA.fullmatch(observation['head']) is not None)
             # The historical fixed FETCH_FAILED code is emitted before merge
             # in all retained workers. It is not evidence about raw fetch cause.
             before_merge = (receipt.get('error') == 'WINDOWS_FETCH_FAILED' or
                 receipt.get('workerFinished') is True and receipt.get('mergeStarted') is False and
                 receipt.get('knownFailure') is True)
-            if state == 'UNCERTAIN' and before_merge and safe and observation['head'] in (
+            # This fixed refusal precedes fetch in every retained worker since
+            # 4f3ce5898021. Legacy receipts lack checkpoints. A later operation
+            # may have advanced HEAD beyond both obsolete payload SHAs; that
+            # cannot turn the original preflight refusal into an unknown write.
+            # Contradictory progress never gains this legacy exemption.
+            precheck_refusal = (receipt.get('error') == 'GITHUB_MAIN_CHANGED' and
+                receipt.get('phase') in (None, 'PRECHECK') and
+                (receipt.get('mergeStarted') is None or receipt.get('mergeStarted') is False) and
+                (receipt.get('workerFinished') is None or receipt.get('workerFinished') is True) and
+                (receipt.get('knownFailure') is None or receipt.get('knownFailure') is True))
+            if state == 'UNCERTAIN' and precheck_refusal and safe:
+                result.update(state='FAILED', head=observation['head'], phase='PRECHECK',
+                              evidence='PRECHECK_REFUSAL_AND_READBACK',
+                              checkoutChanged=observation['head'] != original['expectedHead'])
+            elif state == 'UNCERTAIN' and before_merge and safe and observation['head'] in (
                     original['expectedHead'], original['targetSha']):
                 result.update(state='FAILED', head=observation['head'], phase=receipt.get('phase', 'FETCH'),
                               evidence='PRE_MERGE_FAILURE_AND_READBACK',

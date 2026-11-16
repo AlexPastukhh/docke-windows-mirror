@@ -120,3 +120,11 @@ selected check, a genuine uncertain merge still blocks Pull, fresh facts appear,
 and the browser restart preserves both privacy and the unresolved-effect guard.
 For the reported old failure, fetch cause is unknown. A successful gh auth
 check proves REST identity only; it does not prove Git/GCM fetch authorization.
+
+## Legacy preflight receipt recovery — source follow-up 2026-11-16
+
+The fixed GITHUB_MAIN_CHANGED refusal occurs before Windows fetch and merge in all six retained revisions of pull.py since 4f3ce5898021. Earlier receipts omit progress fields and may refer to two obsolete SHAs after later Windows updates. With verified clean Windows main, valid origin and a valid current HEAD, this known preflight refusal can become FAILED even when HEAD differs from both original SHAs. The original error, payload and timing evidence remain; evidence is PRECHECK_REFUSAL_AND_READBACK. This does not claim execution by the old UUID.
+
+This rule applies only to UNCERTAIN. Conflicting progress (FETCH/MERGE/READBACK, merge started, unfinished worker, false knownFailure or invalid flag types) does not gain the legacy exception. DISPATCHED remains reserved; unknown or post-merge outcomes retain existing conservative rules. No new fetch/merge, receipt deletion, owner-session access or machine permission is introduced.
+
+Owner acceptance after reviewed source update/restart: an old GITHUB_MAIN_CHANGED with obsolete expected/target SHAs should resolve through ordinary selected check, without another Git effect. Preview still validates fresh facts; ff-only ancestry remains mandatory. An unresolved receipt takes priority in the workflow summary, disables the manual Preview assessment, and shows the pending count instead of a contradictory available Preview. Linux fixtures are not Windows runtime acceptance.

@@ -242,7 +242,7 @@ const PULL_BLOCKER_TEXT = {
   DOCKER_MAIN_NOT_VERIFIED: 'Docker primary main не подтверждён как чистый и зарегистрированный',
   DOCKER_MAIN_NOT_AT_GITHUB_MAIN: 'Docker main не совпадает с GitHub main; сначала обновите Docker main штатным Gateway workflow',
   GITHUB_MAIN_UNVERIFIED: 'GitHub main не подтверждён',
-  PREVIOUS_PULL_UNRESOLVED: 'Результат предыдущего Pull не определён; проверьте выбранный репозиторий',
+  PREVIOUS_PULL_UNRESOLVED: 'Новый Pull заблокирован: исход предыдущего Pull не подтверждён',
   WINDOWS_ORIGIN_NOT_VERIFIED: 'Windows origin / Git-клон не подтверждён',
   WINDOWS_NOT_ON_MAIN: 'Windows не на активной ветке main',
   WINDOWS_NOT_CLEAN: 'В Windows есть незакоммиченные изменения или состояние не подтверждено',
@@ -292,6 +292,8 @@ function windowsGithub(row) {
 }
 function overall(row) {
   const d = primary(row), w = row.windows || {}, gh = row.github || {};
+  if (row.pullSafety?.blocked) return ['PULL: НЕТ ПОДТВЕРЖДЕНИЯ',
+    'Обновить состояние обычной проверкой; при сохранении блокировки нужен разбор квитанции Windows'];
   if (!d) return ['НЕТ DOCKER PRIMARY', 'Проверить Git worktree inventory'];
   if (d.branch !== 'main') return ['DOCKER: НЕ MAIN', 'Проверить primary; не переключать автоматически'];
   if (d.clean === false) return ['DOCKER: ИЗМЕНЕНИЯ', 'Разобрать изменения в primary; не использовать reset/stash'];
@@ -369,11 +371,12 @@ function rowDetails(row) {
     'Docker main ↔ GitHub: ' + dockerGithub(row),
     'Доказательство Docker ↔ GitHub: ' + show(d.remoteRelationEvidence),
     'Обязательный CI: ' + show(gh.requiredCI),
-    'Ручной Windows Pull (оценка): ' + (row.actions && row.actions.pull_main_browser &&
-      row.actions.pull_main_browser.available === true ? 'можно запросить свежий Preview' :
+    'Ручной Windows Pull (оценка): ' + (row.pullSafety?.blocked ? 'заблокирован предыдущим Pull' :
+      pullEligible(row) ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
       ' · окончательное решение принимает только свежий серверный Preview',
     'Почему Windows Pull недоступен: ' + pullBlockers(row),
+    'Незавершённых Pull: ' + (row.pullSafety ? show(row.pullSafety.pendingCount) : 'НЕ ПРОВЕРЕНО'),
     'Windows fetch: ' + show(w.fetchStatus) +
       (w.fetchError ? ' · ' + w.fetchError : ''),
     'Время чтения (мс): Docker ' + show(row.readTimingsMs && row.readTimingsMs.dockerInventory) +

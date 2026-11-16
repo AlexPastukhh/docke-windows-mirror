@@ -123,3 +123,77 @@ class PullRecoveryTests(unittest.TestCase):
                  'arbitrary credential':'GIT_FETCH_FAILURE_UNCLASSIFIED'}
         for message, cause in cases.items():
             self.assertEqual({'cause':cause, 'exitCode':128}, fetch_failure(message, 128))
+
+    def test_legacy_main_changed_failure_recovers_after_head_has_advanced(self):
+        current = {**self.observed, 'head':'c'*40}
+        self.seed(error='GITHUB_MAIN_CHANGED', timingsMs={'gatewayMain':42})
+        with mock.patch('mirror_api.pull.windows_status', return_value=current), \
+             mock.patch('mirror_api.pull.subprocess.run') as git:
+            result = self.worker.status(REQUEST_ID)
+            self.assertFalse(self.worker.safety('sample')['blocked'])
+        self.assertEqual('FAILED', result['state'])
+        self.assertEqual('UNCERTAIN', result['previousState'])
+        self.assertEqual('PRECHECK', result['phase'])
+        self.assertEqual('PRECHECK_REFUSAL_AND_READBACK', result['evidence'])
+        self.assertEqual('c'*40, result['head'])
+        self.assertEqual({'gatewayMain':42}, result['timingsMs'])
+        self.assertEqual('GITHUB_MAIN_CHANGED', result['error'])
+        git.assert_not_called()
+        with self.worker._db() as db:
+            self.assertEqual('FAILED', db.execute('SELECT state FROM pull_receipts').fetchone()[0])
+
+    def test_legacy_main_changed_at_target_does_not_claim_original_execution(self):
+        self.seed(error='GITHUB_MAIN_CHANGED')
+        with mock.patch('mirror_api.pull.windows_status', return_value={**self.observed, 'head':NEW}):
+            result = self.worker.status(REQUEST_ID)
+        self.assertEqual('FAILED', result['state'])
+        self.assertEqual('PRECHECK_REFUSAL_AND_READBACK', result['evidence'])
+
+    def test_legacy_precheck_does_not_override_contradictory_progress(self):
+        original = self.seed(error='GITHUB_MAIN_CHANGED')
+        for fields in ({'phase':'MERGE','mergeStarted':True}, {'phase':'FETCH'},
+                       {'phase':'READBACK'}, {'workerFinished':False},
+                       {'knownFailure':False}, {'mergeStarted':0}, {'workerFinished':1}):
+            with self.subTest(fields=fields):
+                with self.worker._db() as db:
+                    db.execute('UPDATE pull_receipts SET result=?', (json.dumps({**original, **fields}),))
+                with mock.patch('mirror_api.pull.windows_status', return_value=self.observed):
+                    self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+
+    def test_legacy_precheck_requires_verified_current_windows_identity(self):
+        self.seed(error='GITHUB_MAIN_CHANGED')
+        for fields in ({'clean':False}, {'originValid':False}, {'branch':'task/work'},
+                       {'error':'WINDOWS_READ_UNAVAILABLE'}, {'head':None}, {'head':'invalid'}):
+            with self.subTest(fields=fields), \
+                 mock.patch('mirror_api.pull.windows_status', return_value={**self.observed, **fields}):
+                self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+
+    def test_legacy_unknown_failure_at_third_head_stays_uncertain(self):
+        self.seed(error='UNKNOWN')
+        with mock.patch('mirror_api.pull.windows_status', return_value={**self.observed, 'head':'c'*40}):
+            self.assertTrue(self.worker.safety('sample')['blocked'])
+
+    def test_dispatched_legacy_precheck_is_never_recovered_while_reserved(self):
+        self.seed(state='DISPATCHED', error='GITHUB_MAIN_CHANGED')
+        with mock.patch('mirror_api.pull.windows_status') as read:
+            self.assertTrue(self.worker.safety('sample')['blocked'])
+            read.assert_not_called()
+
+    def test_restarted_browser_can_preview_after_legacy_refusal_without_old_receipt_access(self):
+        self.body.update(expectedHead='d'*40, targetSha='e'*40)
+        self.seed(error='GITHUB_MAIN_CHANGED')
+        fresh = BrowserPull(self.mirror, self.path)
+        with mock.patch('mirror_api.pull.windows_status', return_value=self.observed), \
+             mock.patch.object(fresh._worker(), '_execute') as effect:
+            self.assertTrue(fresh.preview('sample','new-session')['available'])
+            effect.assert_not_called()
+        with self.assertRaisesRegex(PullDenied, 'PULL_RECEIPT_NOT_OWNED'):
+            fresh.status('sample','new-session',REQUEST_ID)
+
+    def test_legacy_refusal_replay_after_head_advanced_never_dispatches(self):
+        self.seed(error='GITHUB_MAIN_CHANGED')
+        with mock.patch('mirror_api.pull.windows_status', return_value={**self.observed, 'head':'c'*40}), \
+             mock.patch.object(self.worker, '_execute') as effect:
+            for _ in range(2):
+                self.assertEqual('FAILED', self.worker.run(self.body,repo_id='sample',allowed_repos={'sample'})['state'])
+            effect.assert_not_called()
