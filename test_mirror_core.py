@@ -1,6 +1,7 @@
 """Shared domain/admission regressions; all clones and commands are fixtures."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import threading
@@ -31,6 +32,26 @@ class CoreTests(unittest.TestCase):
         core = MirrorCore(self.backend, self.base / 'different.sqlite')
         self.addCleanup(core.close)
         return core
+
+    def test_receipt_transaction_commits_and_closes_connection(self):
+        worker = self.core.worker()
+        with worker._db() as db:
+            db.execute("INSERT INTO mirror_store_meta VALUES('fixture','committed')")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute('SELECT 1')
+        with worker._db() as check:
+            self.assertEqual(('committed',), check.execute("SELECT value FROM mirror_store_meta WHERE name='fixture'").fetchone())
+
+    def test_receipt_transaction_rolls_back_and_closes_on_exception(self):
+        worker = self.core.worker()
+        with self.assertRaisesRegex(RuntimeError, 'fixture rollback'):
+            with worker._db() as db:
+                db.execute("INSERT INTO mirror_store_meta VALUES('fixture','uncommitted')")
+                raise RuntimeError('fixture rollback')
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute('SELECT 1')
+        with worker._db() as check:
+            self.assertIsNone(check.execute("SELECT value FROM mirror_store_meta WHERE name='fixture'").fetchone())
 
     def test_adapters_use_exactly_one_worker_and_guard(self):
         first = BrowserPull(self.backend, core=self.core)

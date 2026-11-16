@@ -5,6 +5,7 @@ or from an explicit owner-local browser preview + confirmation. Both call the
 same restricted executor. A private Git fetch uses the owner's existing Windows
 Git authorization; Gateway GitHub credentials are never copied here.
 """
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -76,10 +77,17 @@ class PullWorker:
         with self.lock:
             return self.repo_locks.setdefault(repo, threading.RLock())
 
+    @contextmanager
     def _db(self):
         db = sqlite3.connect(str(self.path), timeout=remaining(15))
-        db.execute("PRAGMA synchronous=FULL")
-        return db
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+            with db:
+                yield db
+        finally:
+            # Connection.__exit__ commits/rolls back but does not close SQLite.
+            # Explicit close also releases the Windows file handle on errors.
+            db.close()
 
     def _initialize(self):
         with self._db() as db:

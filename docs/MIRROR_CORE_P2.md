@@ -80,7 +80,11 @@ handles to fixture children and verifies both child and grandchild termination.
 It uses temporary roots, no network, no working service stop and no PID-based
 kill of an unrelated process. A Linux skip is not Windows qualification.
 
-Source validation on 2026-11-16: the complete `test_mirror*.py` suite ran 202
+Receipt transactions explicitly close their SQLite connection after commit or
+rollback, including errors. This releases Windows file handles without waiting
+for garbage collection; both transaction paths have regression fixtures.
+
+Source validation on 2026-11-16: the complete `test_mirror*.py` suite ran 204
 tests successfully on Linux, with two native Windows fixtures skipped; Node
 syntax and `git diff --check` passed. Windows CI and owner-host results must
 be recorded separately; this source evidence does not close those gates.
