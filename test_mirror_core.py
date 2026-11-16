@@ -187,4 +187,3 @@ class CoreTests(unittest.TestCase):
         with mock.patch('mirror_api.pull.windows_status',return_value={
                 'head':NEW,'branch':'main','clean':True,'originValid':True,'error':None}):
             self.assertEqual('UNCERTAIN',worker.status(REQUEST_ID)['state'])
-
