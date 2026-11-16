@@ -535,14 +535,30 @@ function activateTab(which) {
   $('panel-worktrees').hidden = which !== 'worktrees';
 }
 async function copyDetails() {
-  const value = detailTab === 'row' ? $('row-full').textContent : $('worktree-full').textContent;
-  if (!value || !active) return;
+  const tab = detailTab, repo = active;
+  const block = tab === 'row' ? $('row-full') : $('worktree-full');
+  const value = block.textContent;
+  if (!value || !repo) return;
   try {
     await navigator.clipboard.writeText(value);
-    $('banner').textContent = 'Скопирован весь блок «' + (detailTab === 'row' ? 'Строка' : 'Worktrees') + '» для ' + active;
+    $('banner').textContent = 'Скопирован весь блок «' + (tab === 'row' ? 'Строка' : 'Worktrees') + '» для ' + repo;
   } catch (error) {
-    // No mutation of Git or page data. User can still select all content in pre.
-    $('banner').textContent = 'Буфер обмена недоступен: выделите текст нижнего блока и нажмите Ctrl+C.';
+    // A permission prompt can outlive navigation or a refreshed snapshot.
+    if (active !== repo || detailTab !== tab || block.textContent !== value) {
+      $('banner').textContent = 'Буфер обмена недоступен. Повторите копирование выбранного блока.';
+      return;
+    }
+    try {
+      block.focus();
+      const selection = window.getSelection(), range = document.createRange();
+      if (!selection) throw new Error('SELECTION_UNAVAILABLE');
+      range.selectNodeContents(block);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      $('banner').textContent = 'Весь блок выделен. Нажмите Ctrl+C, чтобы скопировать.';
+    } catch (ignored) {
+      $('banner').textContent = 'Буфер обмена недоступен: выделите текст нижнего блока и нажмите Ctrl+C.';
+    }
   }
 }
 function selectedVisibleRepos() {
@@ -557,6 +573,7 @@ function updateControls() {
   const checkingClone = Boolean(job && job.started);
   const pending = pendingPulls.has(active);
   const busy = pullBusyRepos.has(active) || readbackBusyRepos.has(active);
+  $('copy-details').disabled = !row;
   $('local').disabled = localBusy;
   $('remote').disabled = !rows.length;
   $('selected-remote').disabled = !row || checkingClone || busy;
