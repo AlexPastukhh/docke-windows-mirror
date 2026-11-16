@@ -1,6 +1,8 @@
 """Shared domain/admission regressions; all clones and commands are fixtures."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+import subprocess
 import sqlite3
 from pathlib import Path
 import tempfile
@@ -11,7 +13,8 @@ from unittest import mock
 from mirror_api.browser_pull import BrowserPull
 from mirror_api.core import MirrorCore
 from mirror_api.operations import ObservationError
-from mirror_api.pull import PullDenied
+from mirror_api.commands import command
+from mirror_api.pull import PullDenied, PullWorker
 from test_mirror_browser_pull import FakeMirror, OLD, NEW, ORIGIN, REQUEST_ID
 
 
@@ -208,3 +211,111 @@ class CoreTests(unittest.TestCase):
         with mock.patch('mirror_api.pull.windows_status',return_value={
                 'head':NEW,'branch':'main','clean':True,'originValid':True,'error':None}):
             self.assertEqual('UNCERTAIN',worker.status(REQUEST_ID)['state'])
+
+
+class LegacyHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.mirror = FakeMirror()
+        self.mirror.windows_root = self.base / 'Repos'
+        self.repo = self.mirror.windows_root / 'sample'
+        self.repo.mkdir(parents=True)
+        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        self.git('init', '-b', 'main')
+        self.git('config', 'user.name', 'Fixture')
+        self.git('config', 'user.email', 'fixture@example.invalid')
+        self.git('remote', 'add', 'origin', ORIGIN)
+        self.old = self.commit('old')
+        self.target = self.commit('target')
+        self.head = self.commit('later')
+        self.worker = PullWorker(self.mirror, self.base / 'receipts.sqlite')
+        self.addCleanup(self.worker.close)
+        self.body = dict(requestId=REQUEST_ID, repoId='sample', expectedHead=self.old,
+                         targetSha=self.target, origin=ORIGIN)
+        self.saved = dict(requestId=REQUEST_ID, state='UNCERTAIN', head=None,
+                          error='WINDOWS_READBACK_UNCONFIRMED', timingsMs={'fastForward':3})
+        self.seed()
+
+    def git(self, *args):
+        return subprocess.check_output(
+            ['git','-c','core.hooksPath=/dev/null','-C',str(self.repo),*args],
+            env=self.env, stderr=subprocess.DEVNULL, timeout=10).decode().strip()
+
+    def commit(self, message):
+        self.git('commit', '--allow-empty', '-m', message)
+        return self.git('rev-parse', 'HEAD')
+
+    def seed(self, **fields):
+        receipt = {**self.saved, **fields}
+        with self.worker._db() as db:
+            db.execute('INSERT OR REPLACE INTO pull_receipts VALUES(?,?,?,?)',
+                (REQUEST_ID,json.dumps(self.body,sort_keys=True,separators=(',',':')),
+                 receipt['state'],json.dumps(receipt)))
+
+    def test_later_clean_main_confirms_inclusion_without_replaying_or_claiming_target_head(self):
+        with mock.patch('mirror_api.operations.command', wraps=command) as calls, \
+             mock.patch.object(self.worker, '_execute') as execute:
+            result = self.worker.status(REQUEST_ID, repo_id='sample')
+            replay = self.worker.run(self.body, repo_id='sample', allowed_repos={'sample'})
+            self.assertFalse(self.worker.safety('sample')['blocked'])
+        self.assertEqual('EXECUTED', result['state'])
+        self.assertEqual('TARGET_INCLUDED_READBACK', result['evidence'])
+        self.assertEqual(self.head, result['head'])
+        self.assertEqual(self.head, result['observation']['head'])
+        self.assertEqual(self.target, result['targetSha'])
+        self.assertTrue(result['targetIncluded'])
+        self.assertEqual('UNCERTAIN', result['previousState'])
+        self.assertEqual(self.saved['error'], result['error'])
+        self.assertEqual(self.saved['timingsMs'], result['timingsMs'])
+        self.assertEqual(result, replay)
+        self.assertIsNone(self.worker.guard.fd, 'Observation never claims a writer')
+        execute.assert_not_called()
+        for call in calls.call_args_list:
+            self.assertFalse({'fetch','merge','reset','push'}.intersection(call.args[0]))
+
+    def test_dirty_wrong_branch_or_origin_does_not_resolve(self):
+        (self.repo/'untracked.txt').write_text('fixture')
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+        (self.repo/'untracked.txt').unlink()
+        self.git('checkout', '-b', 'task/other')
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+        self.git('checkout', 'main')
+        self.git('remote', 'set-url', 'origin', 'https://example.invalid/other.git')
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+
+    def test_unrelated_or_missing_target_does_not_resolve(self):
+        self.git('checkout', '--orphan', 'unrelated')
+        self.commit('unrelated')
+        self.git('branch', '-M', 'main')
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+        self.body['targetSha'] = 'f'*40
+        self.seed()
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+
+    def test_inconsistent_original_ancestry_does_not_resolve(self):
+        self.body['expectedHead'] = self.head
+        self.seed()
+        self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+
+    def test_unknown_errors_dispatched_and_progress_flags_remain_blocked(self):
+        for fields in ({'error':'UNKNOWN'}, {'state':'DISPATCHED'},
+                       {'phase':'READBACK'}, {'phase':'MERGE'}, {'mergeStarted':True},
+                       {'mergeStarted':0}, {'workerFinished':False},
+                       {'workerFinished':1}, {'knownFailure':False}):
+            with self.subTest(fields=fields):
+                self.seed(**fields)
+                self.assertEqual(fields.get('state','UNCERTAIN'), self.worker.status(REQUEST_ID)['state'])
+                self.assertTrue(self.worker.safety('sample')['blocked'])
+
+    def test_readback_race_or_missing_git_evidence_never_resolves(self):
+        from mirror_api.operations import windows_status
+        observed = windows_status(self.mirror.windows_root,'sample',ORIGIN)
+        for after in ({**observed,'head':self.target}, {**observed,'clean':False},
+                      {**observed,'originValid':False}, {**observed,'error':'UNAVAILABLE'}):
+            with self.subTest(after=after), mock.patch('mirror_api.pull.windows_status',
+                    side_effect=[observed,after]):
+                self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])
+        with mock.patch('mirror_api.pull.relation_to_sha', return_value='unknown'):
+            self.assertEqual('UNCERTAIN', self.worker.status(REQUEST_ID)['state'])

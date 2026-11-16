@@ -851,9 +851,16 @@ function pullTimingSummary(previewTimings, receiptTimings, elapsed) {
 }
 async function reconcilePullResult(saved, {previewTimings = null, startedAt = null, refresh = true} = {}) {
   const receipt = await readPullReceipt(saved.repo, saved.requestId);
-  if (receipt.state === 'EXECUTED' && receipt.head === saved.targetSha) {
+  const observed = receipt.observation;
+  const included = receipt.evidence === 'TARGET_INCLUDED_READBACK' && receipt.targetIncluded === true &&
+    receipt.requestId === saved.requestId && receipt.targetSha === saved.targetSha && isSha(receipt.head) &&
+    observed?.head === receipt.head && observed.branch === 'main' && observed.clean === true &&
+    observed.originValid === true && !observed.error;
+  if (receipt.state === 'EXECUTED' && (receipt.head === saved.targetSha || included)) {
     clearPendingPull(saved.repo);
-    const confirmed = (receipt.evidence === 'TARGET_READBACK' ? 'Windows находится на целевом SHA: ' : 'Windows Pull подтверждён: ') + saved.repo + ' → ' + saved.targetSha +
+    const confirmed = included ? 'Прежняя цель Pull содержится в текущей истории: ' + saved.repo +
+      '. Цель: ' + saved.targetSha + '; текущий Windows SHA: ' + receipt.head +
+      '. Подтверждено проверкой истории; исходный Git Pull не повторялся. Request ID: ' + saved.requestId + '.' : (receipt.evidence === 'TARGET_READBACK' ? 'Windows находится на целевом SHA: ' : 'Windows Pull подтверждён: ') + saved.repo + ' → ' + saved.targetSha +
       '. Receipt EXECUTED; Request ID: ' + saved.requestId + '.' +
       pullTimingSummary(previewTimings, receipt.timingsMs,
         startedAt === null ? null : Date.now() - startedAt);

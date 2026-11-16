@@ -494,5 +494,28 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   heldCheckReleases.clear();heldCheckRepos.clear();
   await bulk;
   assert.equal(seenChecks.length-beforeBulk,6,'All six unique repos checked once');
+  const legacyId = '22345678-1234-4234-8234-123456789abc';
+  const recovered = {requestId:legacyId, state:'EXECUTED', evidence:'TARGET_INCLUDED_READBACK',
+    targetIncluded:true, targetSha:sha('d'), head:sha('e'),
+    observation:{head:sha('e'),branch:'main',clean:true,originValid:true,error:null}};
+  const savedLegacy = {repo:'fortis-approvals',requestId:legacyId,targetSha:sha('d')};
+  sandbox.savedLegacy = savedLegacy;
+  const beforeHistoryRecovery = requests.length;
+  for (const change of [{targetIncluded:false}, {requestId:'wrong'}, {targetSha:sha('a')},
+                        {observation:{...recovered.observation,clean:false}}]) {
+    receiptOverride = {ok:true,json:async()=>({...recovered,...change})};
+    vm.runInContext('rememberPendingPull(savedLegacy.repo,savedLegacy.requestId,savedLegacy.targetSha)',sandbox);
+    assert.equal(await vm.runInContext('reconcilePullResult(savedLegacy,{refresh:false})',sandbox),false);
+    assert.equal(vm.runInContext('pendingPulls.has(savedLegacy.repo)',sandbox),true);
+  }
+  receiptOverride = {ok:true,json:async()=>recovered};
+  assert.equal(await vm.runInContext('reconcilePullResult(savedLegacy,{refresh:false})',sandbox),true);
+  assert.equal(vm.runInContext('pendingPulls.has(savedLegacy.repo)',sandbox),false);
+  const historyMessage = vm.runInContext('pullMessages.get(savedLegacy.repo)',sandbox);
+  assert.match(historyMessage,/содержится в текущей истории/);
+  assert.ok(historyMessage.includes(sha('d')) && historyMessage.includes(sha('e')));
+  assert.ok(requests.slice(beforeHistoryRecovery).every(url=>url.includes('/pull-results/')),
+    'Legacy convergence only reads the original receipt; no Preview/Execute/fetch');
+  receiptOverride = null;
   console.log('MIRROR_PRIMARY_TABLE_SMOKE_PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});
