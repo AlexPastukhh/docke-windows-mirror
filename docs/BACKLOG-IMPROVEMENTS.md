@@ -26,6 +26,8 @@
 [Mirror #31](https://github.com/AlexPastukhh/docke-windows-mirror/pull/31),
 [Approvals #108](https://github.com/AlexPastukhh/fortis-approvals/pull/108).
 
+P4 source/security review на свежих `main` обоих проектов: [P4_SOURCE_SECURITY_REVIEW_2026-11-17](unified-api/P4_SOURCE_SECURITY_REVIEW_2026-11-17.md). Он фиксирует проверенные code gaps и порядок реализации, **не** означает P4 implementation, WRITE activation или live acceptance.
+
 ### Где остановились
 
 P0–P3 приняты **по исходникам**. В каталоге 8 READ implemented=true,
