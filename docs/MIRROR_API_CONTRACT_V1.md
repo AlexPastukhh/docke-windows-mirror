@@ -28,9 +28,10 @@ Outstanding work and acceptance gates live in [the backlog](BACKLOG-IMPROVEMENTS
 ## Closed catalog and wire schemas
 
 [contract.json](unified-api/contract.json) maps every operation to its method,
-fixed path, target kind, schemas, effect and intended policy. All entries are
-`implemented: false`, `defaultPolicy: DENY`: this catalog is a design artifact,
-not a registration/config file for the running Gateway.
+fixed path, target kind, schemas, effect and intended policy. Six P3a observation
+READs now have `implemented: true` for source readiness. All defaults remain
+`DENY` and `runtimeActivation: false`; preview/lookup/effects remain unimplemented.
+This catalog is not a registration/config file for the running Gateway.
 [schemas.json](unified-api/schemas.json) is JSON Schema draft 2020-12 with local
 references only. [validate.py](unified-api/validate.py) checks schema integrity,
 catalog consistency and positive/negative examples offline; it calls no API.
