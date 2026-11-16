@@ -21,8 +21,8 @@ routes доступны и какие результаты имеют свежи
 или живой upstream. Отдельный удалённый Gateway ASK остаётся выключен.
 P1 source использует [Windows owner-managed gh reader](../WINDOWS-GITHUB-READ.md)
 для browser main/PR/CI и свежего Pull preflight; actual Windows acceptance
-проверяется отдельно. P0/P2 source приняты owner merge; P3a добавляет шесть
-source-only READ v2, P3b добавляет durable principal-bound preview/lookup.
+проверяется отдельно. P0/P2 source приняты owner merge; P3a (PR #30/#106) принят: шесть
+source-only READ v2, P3b (PR #31/#108) принят: durable principal-bound preview/lookup.
 Signed atomic reservation и P4 effects остаются открытыми задачами. Установка/активация v2 требуют отдельных gates. Нативная GitHub публикация Repo — только typed Gateway
 по [UC-CONT-003](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md#uc-cont-003).
 При неизвестном backend или scope — UNKNOWN/STOP, не credential fallback.
@@ -30,6 +30,9 @@ Signed atomic reservation и P4 effects остаются открытыми за
 **Готово:** source readiness и установленный Windows runtime проверены раздельно;
 конкретная операция подтверждена либо её acceptance остаётся MANUAL-PENDING.
 
-Unified READ v2 source/activation, named inventory scopes, pagination and remaining
-principal-bound preview/lookup gates: [READ-V2](../READ-V2.md). Follow UC-GW-012
+Unified READ v2 source/activation, named inventory scopes, pagination and
+principal-bound preview/lookup constraints: [READ-V2](../READ-V2.md). Follow UC-GW-012
 for transport/onboarding; source merge alone does not enable an operation.
+
+Текущий план выполненных/будущих этапов — [BACKLOG](../BACKLOG-IMPROVEMENTS.md);
+короткий указатель для следующего чата — [handoff](../UNIFIED-MIRROR-HANDOFF.md).

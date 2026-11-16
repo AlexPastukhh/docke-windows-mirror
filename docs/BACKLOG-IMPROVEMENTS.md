@@ -2,34 +2,87 @@
 
 **Единый файл будущих улучшений этого репозитория.** Mirror владеет UI, проверкой Docker/GitHub/Windows SHAs и owner-guarded Windows import. Нормативный процесс GitHub → CI → Windows описан только в [`docs/WORKFLOW.md`](WORKFLOW.md) и общем UC-CONT-002; backlog не заменяет runbook и не разрешает mutation.
 
-## Unified Mirror API — P0 review (2026-11-15)
+## Unified Mirror API — текущий план (проверено 2026-11-17)
 
-[P0 contract/schemas](MIRROR_API_CONTRACT_V1.md) принят owner merge PR #23;
-UC-GW-012/UC-CONT-003 приняты PR #100/#25. Текущее source-состояние v2 — в каталоге ниже; активация отдельно.
-[Source/catalog review](unified-api/P0_SOURCE_REVIEW_2026-11-15.md) отделяет
-проверенные исходники от неподтверждённой установленной runtime.
+Это единственный план этапов Mirror. Контракт — [MIRROR_API_CONTRACT_V1](MIRROR_API_CONTRACT_V1.md);
+технические READ/activation gates — [READ-V2](READ-V2.md). Общие процедуры не дублируются:
+доставка — WORKFLOW/UC-CONT-002/003, подключение API — UC-GW-012.
+Исторический [P0 review](unified-api/P0_SOURCE_REVIEW_2026-11-15.md) не описывает текущую runtime.
 
-- P0 source принят, модель B выбрана; реализация signing/key lifecycle и
-  machine activation остаются DENY до своих code/release/live gates.
-- P1 source: Windows gh reader без Gateway fallback, общий snapshot collector,
-  fixed GET/identity/pipe limits и regression fixtures. Подтвердить реальные
-  Git/GCM/gh scopes, browser main/PR/CI и независимость от Gateway на Windows
-  по [Windows GitHub reader](WINDOWS-GITHUB-READ.md), без остановки Gateway.
-- P2 source принят PR #27/#28/#29: [единый Core/worker/store](MIRROR_CORE_P2.md), root/process
-  guard, привязка ledger и контролируемые дочерние процессы. Сохранены per-clone
-  mutex и запрет replay. Linux и Windows CI проверены; владелец после обновления сообщил, что Browser работает.
-  Это базовая owner-reported проверка, не полный негативный/rollback протокол.
-- P3a source candidate: шесть ограниченных typed v2 READ при сохранённом strict v1.
-  [Контракт и активация READ](READ-V2.md); default DENY, без изменения launcher.
-  P3b source candidate: durable principal-bound preview/lookup в общей ledger;
-  нет production writer для machine bindings до signed atomic reservation P4. Windows install, Gateway
-  release и fresh live READ с отрицательными probes ещё не выполнены.
-- P4: signed ASK dispatch, atomic binding/reservation, deny legacy POST и один
-  exact-SHA ff-only; no-approval/READ credential/replay/timeout/concurrency tests.
-- P5: owner cutover/rollback с сохранённой DB; старый listener/launcher не
-  удалять до живой приёмки. P6 обновляет docs/evidence на каждом этапе.
-- Windows-only inventory из открытого Approvals PR #87 — отдельный scope;
-  не расширять зарегистрированные пары и права автоматически.
+| Этап | Принятые исходники / результат | Что ещё требуется |
+| --- | --- | --- |
+| P0 | Контракт и wire v2/schema; модель B (Ed25519), PR #23 | Signing capability и key lifecycle не реализованы принятием контракта |
+| P1 | Windows owner-managed gh reader, общий bounded collector, без Gateway/PAT fallback | Полная Windows Git/GCM/gh и PR/CI/error qualification; базовое «Browser работает» не заменяет протокол |
+| P2 | Общий Core/worker/ledger, root/process guard, bounded children; PR #27/#28/#29, Linux/Windows CI | Полный owner negative/crash/rollback протокол и lifecycle qualification |
+| P3a | 6 bounded observation READ v2; Mirror #30 и Approvals #106 слиты | Установка и live READ v2 с отрицательными probes |
+| P3b | Durable principal-bound preview/lookup; Mirror #31 и Approvals #108 слиты, CI зелёный | Нет production writer для machine_bindings до P4; установка/live acceptance отдельно |
+| P4 | **Не реализован:** signed ASK dispatch и атомарные binding/reservation | Source/security review, код и отрицательные тесты ниже; WRITE до admission остаётся DENY |
+| P5 | **Не выполнен:** owner release/cutover/rollback | Согласованные Windows/Gateway release, сохранение ledger, реальная приёмка; старый listener/launcher сохраняются до неё |
+| P6 | Документы/evidence обновляются на каждом этапе | Продолжать фиксировать source, installed runtime и live results отдельно |
+
+Ссылки на принятые P3 изменения:
+[Mirror #30](https://github.com/AlexPastukhh/docke-windows-mirror/pull/30),
+[Approvals #106](https://github.com/AlexPastukhh/fortis-approvals/pull/106),
+[Mirror #31](https://github.com/AlexPastukhh/docke-windows-mirror/pull/31),
+[Approvals #108](https://github.com/AlexPastukhh/fortis-approvals/pull/108).
+
+### Где остановились
+
+P0–P3 приняты **по исходникам**. В каталоге 8 READ implemented=true,
+default DENY и runtimeActivation=false. Strict get_repository v1 сохранён.
+P3b хранит immutable preview в общей ledger и читает только связанные machine
+receipts; Browser/чужие UUID не открываются. Production association writer
+отсутствует, успешные associations в тестах созданы только в изолированных fixtures.
+Повтор preview не обновляет TTL; NOT_FOUND/DISPATCHED/UNCERTAIN не доказывают NONE.
+
+Установка/активация unified READ v2 и live acceptance **в этой работе не выполнялись**.
+Последнее сообщение владельца подтверждало базовую работу Browser после обновления,
+а не полный P3 runtime протокол. Актуальные установленные версии, catalog, CA/bind
+и scopes новый исполнитель проверяет заново; исторические SHA не являются current state.
+Source P3 checks: Mirror 235 tests (2 Windows-only skips), Gateway после объединения
+с другими принятыми изменениями 1030 tests; exact-head CI зелёный; 8 loopback-only
+pinned HTTPS fixture calls. Эти результаты не доказывают живую интеграцию.
+
+### Следующая работа: P4 source/security review
+
+1. Сверить D-04 и закрытые schemas с свежими main/capabilities. Сохранить один
+   Core/worker/ledger, v1 и default DENY; не создавать альтернативный executor.
+2. До реализации оценить существующий Gateway vault/controller: отдельные READ,
+   WRITE и signing роли, generations, pinning/rotation/revocation и Windows
+   dependency/verification profile. Ed25519 выбран; ключи не provisioned.
+   Проверить ограничение Operation.credential/Context на один credential.
+3. Решить доверенную передачу actor **до ASK**: нынешний trusted_identity читает
+   уже сохранённую Core row в execute/reconcile; Core.submit.prepare вызывается
+   до вставки этой row. Не переносить этот helper в pre-approval без изменения
+   контракта и не принимать actor/approved из публичных params.
+4. Связать executeParams.previewId с точным persisted snapshot и свежими
+   preconditions. Текущий preview GET повторяется по исходному READ UUID;
+   закрытый способ чтения snapshot по previewId для ASK нужно спроектировать.
+   Никакого обновления target/TTL после ASK; stale требует новой заявки.
+5. Проверяемая подпись только после Core approval/revalidation. В одной durable
+   транзакции связать actor/repo/UUID/immutable identity и зарезервировать эффект.
+   Не привязывать старые Browser receipts и не писать binding отдельной
+   незащищённой стадией перед reservation. Использовать существующий worker.
+6. Покрыть Reject/no approval, READ credential на WRITE, неверные claim/key/actor/
+   repo/SHA, TTL/generation/replay/conflict, concurrent writers, crash/timeout/lost
+   ack и readback. После неоднозначного эффекта — lookup исходного UUID без replay.
+
+Опорные исходники: mirror_api/core.py, machine_reads.py, read_v2.py, gateway_v2.py,
+pull.py; в Approvals — integrations/mirror/read_v2.py и tls.py, extensions/model.py,
+runtime.py, vault.py и core.py. Перед изменением проверять текущие реализации.
+Пункты 2–4 — проверки/дизайн, а не обещание уже существующих SDK capabilities.
+
+### Admission и внедрение
+
+READ v2 допускается отдельно через существующие UC-GW-012 manifest/linter,
+Doctor/Acceptance и согласованное owner window. Проверяются точный installed
+source/image/config, фактический Gateway network path, pinned HTTPS/443,
+scoped READ credential, отрицательные TLS/auth/scope/write probes.
+Owner READ release можно планировать отдельно от разработки P4; ASK допускается
+только после security review и live READ gate. Signing/WRITE credential, key
+provisioning, установка dependencies, изменение bind/портов, restart/deployment
+и retirement старого listener требуют отдельного согласования.
+Windows-only inventory и расширение approved scopes — отдельные задачи.
 
 ## Mirror UX / readback — source принят, частичная Windows acceptance
 
