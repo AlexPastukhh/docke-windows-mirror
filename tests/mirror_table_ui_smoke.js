@@ -75,7 +75,7 @@ const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: fa
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
 let clipboard = null;
 let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
-let denyGatewayRead = false;
+let denyGatewayRead = false, receiptOverride = null, safetyBlocked = false;
 let deferRefresh = false, releaseRefresh = null;
 let deferCheckRepo = null, releaseCheck = null;
 const heldCheckRepos = new Set(), heldCheckReleases = new Map(), seenChecks = [];
@@ -107,6 +107,7 @@ const fetch = async (url, options = {}) => {
       timingsMs: {gatewayMain: 200, windowsFetch: 350, fastForward: 4, executeTotal: 650}}};
   }
   if (url.includes('/pull-results/')) {
+    if (receiptOverride) return receiptOverride;
     uncertainReads++;
     return {ok: true, json: async () => ({
       state: uncertainMode && uncertainReads < 2 ? 'UNCERTAIN' : 'EXECUTED',
@@ -149,8 +150,8 @@ const fetch = async (url, options = {}) => {
     const name = decodeURIComponent(url.slice('/api/v1/repositories/'.length, -'?remote=true'.length));
     if (deferRefresh && name === 'fortis-approvals')
       await new Promise(resolve => {releaseRefresh = resolve;});
-    return {ok: true, json: async () => ({repository: fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
-      'updated-task', {checked: true, relation: 'equal'})})};
+    return {ok: true, json: async () => ({repository: {...fixture(name, name === 'docke-windows-mirror' ? sha('a') : (pulled ? sha('d') : sha('c')),
+      'updated-task', {checked: true, relation: 'equal'}), pullSafety:{blocked:safetyBlocked}}})};
   }
   throw Error('unexpected fetch ' + url);
 };
@@ -373,7 +374,7 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.match(elements['pull-result'].textContent, /Execute GitHub main: 200 мс/);
   assert.match(elements['pull-result'].textContent, /Windows fetch: 350 мс/);
   assert.match(elements['pull-result'].textContent, /Git merge --ff-only: 4 мс/);
-  assert.equal(elements['receipt-controls'].hidden, true, 'Success is confirmed before table refresh');
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   deferRefresh = false;
   releaseRefresh();
   await new Promise(resolve => setImmediate(resolve));
@@ -383,7 +384,7 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.match(elements['pull-result'].textContent, new RegExp(sha('d')));
   assert.equal(elements['primary-rows'].children.length, 2);
   assert.equal(elements['primary-rows'].children[1].children[11].textContent, 'АКТУАЛЕН');
-  assert.equal(elements['receipt-controls'].hidden, true, 'Successful pull clears readback controls');
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   // A normal UNCERTAIN response reconciles without another Execute.
   uncertainMode = true;
   uncertainReads = 0;
@@ -391,13 +392,17 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   const beforeUncertain = requests.filter(url => url.endsWith('/pull-execute')).length;
   await elements['pull-windows'].onclick();
   assert.equal(requests.filter(url => url.endsWith('/pull-execute')).length, beforeUncertain + 1);
-  assert.equal(elements['receipt-controls'].hidden, false, 'Owner sees read-only confirmation button');
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   assert.ok(browserStorage.has('fortis.mirror.pendingPulls.v2'),
     'Uncertain request remains available across page reload in this tab');
   assert.match(elements['pull-result'].textContent, /Git видит локальные изменения/);
   assert.equal(elements['pull-windows'].disabled, true, 'No second Pull while receipt unresolved');
-  await elements['check-pull-result'].onclick();
-  assert.equal(elements['receipt-controls'].hidden, true, 'Confirmed receipt closes the warning');
+  assert.equal(elements['selected-remote'].disabled, false);
+  const beforeRecovery = requests.length;
+  await elements['selected-remote'].onclick();
+  assert.ok(requests.slice(beforeRecovery).some(url => url.endsWith('?remote=true')));
+  assert.ok(!requests.slice(beforeRecovery).some(url => url.endsWith('/check-windows')), 'Pending recovery never fetches Git metadata');
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'),
     'Confirmed receipt is cleared from session storage');
   assert.match(elements['pull-result'].textContent, /Receipt EXECUTED/);
@@ -414,15 +419,50 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.equal(JSON.parse(browserStorage.get('fortis.mirror.pendingPulls.v2')).length,2);
   elements['primary-rows'].children[0].onclick();
   assert.match(elements['pull-result'].textContent,/33333333/);
-  assert.equal(elements['receipt-controls'].hidden,false);
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   elements['primary-rows'].children[1].onclick();
   assert.match(elements['pull-result'].textContent,/44444444/);
-  assert.equal(elements['receipt-controls'].hidden,false);
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   vm.runInContext("clearPendingPull('docke-windows-mirror')",sandbox);
   assert.equal(JSON.parse(browserStorage.get('fortis.mirror.pendingPulls.v2')).length,1);
-  assert.equal(elements['receipt-controls'].hidden,false,'Other clone receipt remains actionable');
+  assert.ok(!unique.has('check-pull-result'), 'Ordinary selected check handles recovery');
   vm.runInContext("clearPendingPull('fortis-approvals')",sandbox);
   assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'));
+  // A still-unknown receipt also refreshes the ordinary selected row.
+  elements['primary-rows'].children[1].onclick();
+  vm.runInContext('rememberPendingPull(pendingB.repo,pendingB.requestId,pendingB.targetSha)',sandbox);
+  receiptOverride = {ok:true,json:async () => ({state:'UNCERTAIN',error:'WINDOWS_FF_FAILED',
+    phase:'MERGE',requestId:sandbox.pendingB.requestId,expectedHead:sha('c'),targetSha:sha('d'),
+    observation:{head:sha('c'),checkedAt:'2026-11-16T01:02:03Z'}})};
+  safetyBlocked = true;
+  const beforeUnknown = requests.length;
+  await elements['selected-remote'].onclick();
+  assert.ok(requests.slice(beforeUnknown).some(url => url.endsWith('?remote=true')));
+  assert.ok(!requests.slice(beforeUnknown).some(url => url.endsWith('/check-windows') || url.endsWith('/pull-execute')));
+  assert.match(elements['pull-result'].textContent,/2026-11-16T01:02:03Z/);
+  assert.equal(elements['selected-remote'].disabled,false);
+  assert.equal(elements['pull-windows'].disabled,true);
+  // Lost in-memory ownership clears only stale UI binding, not server fencing.
+  receiptOverride = {ok:false,status:404,json:async () => ({error:'PULL_RECEIPT_NOT_OWNED'})};
+  await elements['selected-remote'].onclick();
+  assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'));
+  assert.match(elements['pull-result'].textContent,/Сессия предыдущего Pull завершилась/);
+  assert.equal(elements['pull-windows'].disabled,true,'Server safety survives stale session cleanup');
+  assert.match(elements['pull-windows'].title,/предыдущего Pull/);
+  // Known fetch failure shows its category and fresh facts, never auto-retries.
+  vm.runInContext('rememberPendingPull(pendingB.repo,pendingB.requestId,pendingB.targetSha)',sandbox);
+  receiptOverride = {ok:true,json:async () => ({state:'FAILED',error:'WINDOWS_FETCH_FAILED',phase:'FETCH',
+    requestId:sandbox.pendingB.requestId,expectedHead:sha('c'),targetSha:sha('d'),
+    diagnostic:{cause:'GIT_AUTH_REQUIRED',exitCode:128},
+    observation:{head:sha('c'),checkedAt:'2026-11-16T02:03:04Z'}})};
+  safetyBlocked = false;
+  const beforeFailed = requests.length;
+  await elements['selected-remote'].onclick();
+  assert.match(elements['pull-result'].textContent,/Git требует авторизацию/);
+  assert.match(elements['pull-result'].textContent,/exit 128/);
+  assert.ok(!browserStorage.has('fortis.mirror.pendingPulls.v2'));
+  assert.ok(!requests.slice(beforeFailed).some(url => url.endsWith('/pull-execute') || url.endsWith('/check-windows')));
+  receiptOverride = null;
   // Check-all + selected checks share a bounded global queue. A queued row
   // can be promoted, and selected controls remain usable during other work.
   sandbox.extraRows = ['alpha','beta','gamma','delta'].map(name =>

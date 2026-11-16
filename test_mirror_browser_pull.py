@@ -217,13 +217,13 @@ class BrowserPullUnitTests(unittest.TestCase):
              mock.patch('mirror_api.pull.github_main',return_value={'head':OLD,'error':None}) as gh, \
              mock.patch('mirror_api.pull.subprocess.run') as git_run:
             result=self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
-        self.assertEqual('UNCERTAIN',result['state'])
+        self.assertEqual('FAILED',result['state'])
         self.assertEqual('GITHUB_MAIN_CHANGED',result['error'])
         self.assertIn('gatewayMain',result['timingsMs'])
         self.assertIn('executeTotal',result['timingsMs'])
         gh.assert_called_once_with('sample',ORIGIN,details=False)
         git_run.assert_not_called()
-        self.assertEqual('UNCERTAIN',self.pull.status('sample','one',preview['requestId'])['state'])
+        self.assertEqual('FAILED',self.pull.status('sample','one',preview['requestId'])['state'])
         with self.assertRaises(PullDenied):
             self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
 
@@ -317,6 +317,30 @@ class BrowserPullHttpTests(unittest.TestCase):
         base.update(headers or {})
         return self.request('POST', '/api/v1/repositories/' + repo + '/' + action,
                             data, headers=base)
+
+    def test_owner_check_after_restart_observes_unresolved_receipt_without_fetch(self):
+        self.login()
+        self.mirror.windows_root = Path(self.server.browser_pull.receipt_db).parent / 'Repos'
+        worker = self.server.browser_pull._worker()
+        payload = {'requestId':REQUEST_ID,'repoId':'sample','expectedHead':OLD,'targetSha':NEW,'origin':ORIGIN}
+        with worker._db() as db:
+            db.execute('INSERT INTO pull_receipts VALUES(?,?,?,?)',
+                (REQUEST_ID,json.dumps(payload),'UNCERTAIN',json.dumps({
+                    'requestId':REQUEST_ID,'state':'UNCERTAIN','head':None,'error':'UNKNOWN'})))
+        with mock.patch('mirror_api.pull.windows_status',return_value={
+                'head':OLD,'branch':'main','clean':True,'originValid':True,'error':None}):
+            code,result,_ = self.post('check-windows')
+            self.assertEqual(200,code)
+            self.assertTrue(result['repository']['pullSafety']['blocked'])
+            code,result,_ = self.request('GET','/api/v1/repositories/sample?remote=true',
+                                        headers={'Cookie':self.cookie})
+            self.assertEqual(200,code)
+            self.assertTrue(result['repository']['pullSafety']['blocked'])
+        self.assertEqual([],self.mirror.checks,'Unknown Pull never dispatches metadata fetch')
+        code,result,_ = self.request('GET','/api/v1/repositories/sample/pull-results/'+REQUEST_ID,
+                                    headers={'Cookie':self.cookie})
+        self.assertEqual(404,code)
+        self.assertEqual('PULL_RECEIPT_NOT_OWNED',result['error'])
 
     def test_authentication_host_origin_and_csrf_are_separate(self):
         code, value, _ = self.request('POST', '/api/v1/repositories/sample/pull-preview', '{}',

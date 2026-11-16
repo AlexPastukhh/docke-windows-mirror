@@ -34,11 +34,24 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
 - Исправление Windows Git `core.autocrlf` (системный config не игнорируется при
   чтении), сохранение точного porcelain ` M`, повторные **только read-only**
   проверки после fast-forward, конкретные коды непрошедшего readback и
-  однокнопочное получение прежнего receipt без F12/повторного Git.
+  получение прежнего receipt через обычную проверку выбранного репозитория
+  без F12/повторного Git.
 - Источник и Linux/Node-тесты **не доказывают Windows runtime/UX acceptance**.
   После принятого PR и обновления Windows clone нужно отдельно проверить
   реальный Browser Mirror, размеры колонок, сохранение после перезапуска
   браузера, CRLF, `UNCERTAIN` и отсутствие второго Git-эффекта.
+
+## Pull recovery — source follow-up 2026-11-16
+
+- Обычная проверка обновляет receipt и строку даже при UNCERTAIN; отдельная
+  кнопка результата Pull удалена. Сохранены session ownership и запрет replay.
+- Checkpoints до fetch/merge/readback, безопасная категория fetch failure,
+  read-only разрешение известного pre-merge отказа в FAILED. DISPATCHED и
+  оставшийся UNCERTAIN блокируют новый UUID; P2 process guard ещё не принят.
+- После restart — внутренняя repo-scoped сверка без доступа новой сессии к
+  старой квитанции. Неизвестный исход блокирует Preview/metadata fetch.
+- Source/fixture checks не подтверждают установленную Windows runtime.
+  Требуется owner acceptance по [runbook](WINDOWS-GITHUB-READ.md#pull-failure-recovery--source-follow-up-2026-11-16).
 
 ## Производительность основной проверки — 2026-11-09
 
