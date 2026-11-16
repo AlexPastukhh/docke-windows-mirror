@@ -13,8 +13,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+import uuid
 from .operations import ObservationError, SHA, checked_at, git, github_main, windows_status, docker_inventory
 from .git_errors import fetch_failure
+from .commands import command, OutputLimit, ChildrenUnconfirmed, remaining
+from .process_guard import WriterGuard
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 
@@ -38,13 +41,34 @@ class PullFetchFailed(ObservationError):
 
 class PullWorker:
     """One serial lock/SQLite store per Windows Mirror Service process."""
-    def __init__(self, mirror, db_path):
+    def __init__(self, mirror, db_path, *, guard=None):
         self.mirror = mirror
+        self.guard = guard if guard is not None else WriterGuard(mirror.windows_root)
         self.path = Path(db_path)
+        if (self.path.resolve().is_relative_to(Path(__file__).resolve().parent.parent) or
+                self.path.resolve().is_relative_to(Path(mirror.windows_root).resolve())):
+            raise PullDenied('PULL_RECEIPT_STORAGE_UNSAFE')
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.repo_locks = {}
         self._initialize()
+        self.guard.bind_store(self.path, self.store_id)
+
+    def close(self):
+        self.guard.close()
+
+    @staticmethod
+    def _command(argv, **kwargs):
+        try:
+            return command(argv, **kwargs)
+        except ChildrenUnconfirmed:
+            raise
+        except subprocess.TimeoutExpired:
+            raise ObservationError('WINDOWS_COMMAND_TIMEOUT') from None
+        except OutputLimit:
+            raise ObservationError('WINDOWS_COMMAND_OUTPUT_LIMIT') from None
+        except OSError:
+            raise ObservationError('WINDOWS_COMMAND_UNAVAILABLE') from None
 
     def _repo_lock(self, repo):
         # Clone-specific serialization: independent Windows primaries can Pull
@@ -53,7 +77,7 @@ class PullWorker:
             return self.repo_locks.setdefault(repo, threading.RLock())
 
     def _db(self):
-        db = sqlite3.connect(str(self.path), timeout=15)
+        db = sqlite3.connect(str(self.path), timeout=remaining(15))
         db.execute("PRAGMA synchronous=FULL")
         return db
 
@@ -62,6 +86,12 @@ class PullWorker:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("CREATE TABLE IF NOT EXISTS pull_receipts (request_id TEXT PRIMARY KEY, "
                        "payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT)")
+
+            db.execute('CREATE TABLE IF NOT EXISTS mirror_store_meta (name TEXT PRIMARY KEY,value TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO mirror_store_meta VALUES(?,?)', ('store_id',str(uuid.uuid4())))
+            self.store_id = db.execute('SELECT value FROM mirror_store_meta WHERE name=?',('store_id',)).fetchone()[0]
+            if type(self.store_id) is not str or not UUID.fullmatch(self.store_id):
+                raise PullDenied('PULL_RECEIPT_STORAGE_UNCONFIRMED')
 
     @staticmethod
     def payload(value):
@@ -122,18 +152,19 @@ class PullWorker:
                 (receipt.get('mergeStarted') is None or receipt.get('mergeStarted') is False) and
                 (receipt.get('workerFinished') is None or receipt.get('workerFinished') is True) and
                 (receipt.get('knownFailure') is None or receipt.get('knownFailure') is True))
-            if state == 'UNCERTAIN' and precheck_refusal and safe:
+            finished = receipt.get('workerFinished') is not False
+            if state == 'UNCERTAIN' and finished and precheck_refusal and safe:
                 result.update(state='FAILED', head=observation['head'], phase='PRECHECK',
                               evidence='PRECHECK_REFUSAL_AND_READBACK',
                               checkoutChanged=observation['head'] != original['expectedHead'])
-            elif state == 'UNCERTAIN' and before_merge and safe and observation['head'] in (
+            elif state == 'UNCERTAIN' and finished and before_merge and safe and observation['head'] in (
                     original['expectedHead'], original['targetSha']):
                 result.update(state='FAILED', head=observation['head'], phase=receipt.get('phase', 'FETCH'),
                               evidence='PRE_MERGE_FAILURE_AND_READBACK',
                               checkoutChanged=observation['head'] != original['expectedHead'])
                 if receipt.get('error') == 'WINDOWS_FETCH_FAILED':
                     result.setdefault('diagnostic', {'cause': 'FETCH_REASON_NOT_RECORDED', 'exitCode': None})
-            elif state == 'UNCERTAIN' and not before_merge and safe and observation['head'] == original['targetSha']:
+            elif state == 'UNCERTAIN' and finished and not before_merge and safe and observation['head'] == original['targetSha']:
                 result.update(state='EXECUTED', head=observation['head'], evidence='TARGET_READBACK')
             if result['state'] != state:
                 result['previousState'] = state
@@ -157,11 +188,12 @@ class PullWorker:
                     selected.append(row[0])
         return selected
 
-    def safety(self, repo_id):
+    def safety(self, repo_id, *, reconcile=True):
         # Internal repo-scoped recovery exposes no old-session receipt/UUID.
         pending = self._pending(repo_id)
-        for ident in pending[:64]:
-            self.status(ident, repo_id=repo_id)
+        if reconcile:
+            for ident in pending[:64]:
+                self.status(ident, repo_id=repo_id)
         remaining = self._pending(repo_id)
         return {'blocked': bool(remaining), 'pendingCount': len(remaining), 'checkedAt': checked_at()}
 
@@ -179,7 +211,11 @@ class PullWorker:
         if value["repoId"] != repo_id or repo_id not in allowed_repos:
             raise PullDenied("REPOSITORY_NOT_ALLOWED")
         frozen = json.dumps(value, sort_keys=True, separators=(",", ":"))
-        with self._repo_lock(repo_id):
+        repo_lock = self._repo_lock(repo_id)
+        if not repo_lock.acquire(blocking=False):
+            return self._record_refusal(value, frozen, 'REPOSITORY_OPERATION_PENDING')
+        try:
+            refusal = None
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 # Reservation is durable before touching Git. Any repeated request
@@ -192,19 +228,42 @@ class PullWorker:
                 else:
                     # A separate Mirror process using the same receipt DB must not
                     # start another Pull on this clone while the first is dispatched.
-                    pending = db.execute("SELECT payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')").fetchall()
-                    if any(json.loads(item[0])["repoId"] == repo_id for item in pending):
-                        raise PullDenied("REPOSITORY_OPERATION_PENDING")
-                    progress = {'requestId': value['requestId'], 'state': 'DISPATCHED', 'head': None,
-                                'phase': 'PRECHECK', 'mergeStarted': False}
+                    pending = db.execute("SELECT payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')")
+                    for index, item in enumerate(pending):
+                        if index >= 4096:
+                            refusal = self._refusal(value, 'PULL_HISTORY_LIMIT_REACHED')
+                            break
+                        if json.loads(item[0])["repoId"] == repo_id:
+                            refusal = self._refusal(value, 'REPOSITORY_OPERATION_PENDING')
+                            break
+                    progress = refusal or {'requestId': value['requestId'], 'state': 'DISPATCHED', 'head': None,
+                                           'phase': 'PRECHECK', 'mergeStarted': False}
                     db.execute("INSERT INTO pull_receipts VALUES(?,?,?,?)",
-                               (value["requestId"], frozen, "DISPATCHED", json.dumps(progress)))
+                               (value["requestId"], frozen, progress['state'], json.dumps(progress)))
             if row:
                 return self.status(value["requestId"], repo_id=repo_id)
+            if refusal is not None:
+                return refusal
+            try:
+                self.guard.acquire()
+            except OSError as exc:
+                # Admission never started a child; preserve an owned terminal
+                # receipt rather than leaving the browser UUID DISPATCHING.
+                code = str(exc) if isinstance(exc, (ValueError, OSError)) else ''
+                if code not in ('MIRROR_WRITER_BUSY','WINDOWS_ROOT_UNAVAILABLE',
+                                'WINDOWS_PREVIOUS_CHILDREN_ACTIVE','WINDOWS_PREVIOUS_JOB_UNCONFIRMED',
+                                'MIRROR_RECEIPT_STORE_MISMATCH','MIRROR_RECEIPT_STORE_UNCONFIRMED'):
+                    code = 'MIRROR_WRITER_UNAVAILABLE'
+                receipt = self._refusal(value, code)
+                with self._db() as db:
+                    db.execute('UPDATE pull_receipts SET state=?,result=? WHERE request_id=?',
+                               ('FAILED', json.dumps(receipt), value['requestId']))
+                return receipt
             timings = {}
             started = time.perf_counter()
             try:
-                receipt = self._execute(value, timings=timings)
+                with self.guard.scope():
+                    receipt = self._execute(value, timings=timings)
             except (PullDenied, ObservationError) as exc:
                 # After reservation, any error might have interrupted the effect.
                 # Never retry it automatically. Readback/reconcile may resolve it.
@@ -220,8 +279,13 @@ class PullWorker:
                 if isinstance(exc, PullReadbackUnconfirmed):
                     receipt['readbackIssues'] = exc.issues
             except Exception:
+                with self._db() as db:
+                    progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                                     (value['requestId'],)).fetchone()[0])
                 receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
-                           "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at()}
+                           "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at(),
+                           "phase": progress['phase'], "mergeStarted": progress['mergeStarted'],
+                           "workerFinished": not self.guard.poisoned, "knownFailure": False}
             if timings:
                 # Only bounded durations, no Git paths/credentials/CLI output.
                 timings['executeTotal'] = round((time.perf_counter() - started) * 1000)
@@ -231,6 +295,30 @@ class PullWorker:
                            (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
             # Readback can confirm a pre-merge failure, but never dispatch Git.
             return self.status(value['requestId'], repo_id=repo_id) if receipt['state'] == 'UNCERTAIN' else receipt
+
+        finally:
+            repo_lock.release()
+
+    def _record_refusal(self, value, frozen, error):
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM pull_receipts WHERE request_id=?',
+                             (value['requestId'],)).fetchone()
+            if row:
+                if row[0] != frozen:
+                    raise PullDenied('REQUEST_ID_CONFLICT')
+            else:
+                receipt = self._refusal(value, error)
+                db.execute('INSERT INTO pull_receipts VALUES(?,?,?,?)',
+                           (value['requestId'],frozen,'FAILED',json.dumps(receipt)))
+        return self.status(value['requestId']) if row else receipt
+
+    @staticmethod
+    def _refusal(value, error):
+        return {'requestId':value['requestId'], 'state':'FAILED', 'head':None,
+                'phase':'ADMISSION', 'mergeStarted':False, 'workerFinished':True,
+                'knownFailure':True, 'error':error, 'evidence':'PRE_EFFECT_REFUSAL',
+                'checkedAt':checked_at()}
 
     def _confirmed_readback(self, repo, origin, target):
         """Retry only Git observation after a successful ff-only; never Git write.
@@ -297,12 +385,12 @@ class PullWorker:
         # A GitHub credential, if needed, must already be configured for this
         # Windows clone. Never accept one in the request or read Gateway secrets.
         self._checkpoint(p, 'FETCH', False)
-        fetched = measured('windowsFetch', lambda: subprocess.run(
+        fetched = measured('windowsFetch', lambda: self._command(
                 ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                  "-c", "protocol.file.allow=never", "-C", str(root), "fetch", "--no-tags",
                  "--no-recurse-submodules", "origin", "main"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=180, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")))
+                timeout=45, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")))
         if fetched.returncode:
             raise PullFetchFailed(fetched)
         fetched_head = measured('fetchHeadRead',
@@ -316,18 +404,18 @@ class PullWorker:
                 again["clean"] is not True or not again["originValid"]):
             raise PullDenied("WINDOWS_CHANGED_AFTER_FETCH")
         # A pinned SHA is required, never mutable FETCH_HEAD as the merge target.
-        ancestry = measured('gitAncestry', lambda: subprocess.run(
+        ancestry = measured('gitAncestry', lambda: self._command(
                 ["git", "-C", str(root), "merge-base", "--is-ancestor",
                  p["expectedHead"], p["targetSha"]], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10))
         if ancestry.returncode:
             raise PullDenied("NOT_FAST_FORWARD")
         self._checkpoint(p, 'MERGE', True)
-        update = measured('fastForward', lambda: subprocess.run(
+        update = measured('fastForward', lambda: self._command(
                 ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                  "-c", "protocol.file.allow=never", "-C", str(root), "merge", "--ff-only",
                  p["targetSha"]], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=180))
+                stderr=subprocess.PIPE, timeout=45))
         if update.returncode:
             raise ObservationError("WINDOWS_FF_FAILED")
         self._checkpoint(p, 'READBACK', True)

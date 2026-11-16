@@ -14,8 +14,10 @@ import threading
 import webbrowser
 from urllib.parse import parse_qs, urlsplit
 from .operations import Mirror, ObservationError, REPO, set_preview_source
-from .pull import PullWorker, PullDenied
+from .pull import PullDenied
 from .browser_pull import BrowserPull
+from .core import MirrorCore
+from .gateway_readonly import TRUSTED_HTTP_HOSTS
 
 STATIC = Path(__file__).parent / "static"
 
@@ -24,19 +26,26 @@ class MirrorServer(ThreadingHTTPServer):
     allow_reuse_address = False
     daemon_threads = True
 
-    def __init__(self, address, mirror, *, allow_browser_pull=True, receipt_db=None):
+    def __init__(self, address, mirror, *, allow_browser_pull=True, receipt_db=None, core=None):
         if address[0] != "127.0.0.1":
             raise ValueError("LOOPBACK_ONLY")
-        self.mirror = mirror
+        self.core = core if core is not None else MirrorCore(mirror, receipt_db, read_only=not allow_browser_pull)
+        self.mirror = self.core
         self.bootstrap_token = secrets.token_urlsafe(32)
         self.sessions = set()
         self.csrf_key = secrets.token_bytes(32)
         self.lock = threading.Lock()
         self.allow_browser_pull = bool(allow_browser_pull)
-        self.browser_pull = BrowserPull(mirror, receipt_db)
+        self.browser_pull = BrowserPull(mirror, receipt_db, core=self.core)
         self.repo_actions = set()
         self.repo_actions_guard = threading.Lock()
         super().__init__(address, Handler)
+
+    def server_close(self):
+        try:
+            super().server_close()
+        finally:
+            self.core.close()
 
     def claim_repo_action(self, repo_id):
         with self.repo_actions_guard:
@@ -51,6 +60,11 @@ class MirrorServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    MAX_RESPONSE_BYTES = 1048576
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(60)
+
     server_version = "FortisMirror/0.1"
 
     def log_message(self, format, *args):
@@ -58,7 +72,19 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def send(self, status, data, content_type="application/json", extra=None):
-        payload = data if isinstance(data, bytes) else json.dumps(data, ensure_ascii=False).encode("utf-8")
+        payload = data if isinstance(data, bytes) else None
+        if payload is None:
+            encoded = bytearray()
+            for piece in json.JSONEncoder(ensure_ascii=False, separators=(',', ':')).iterencode(data):
+                part = piece.encode('utf-8')
+                if len(encoded) + len(part) > self.MAX_RESPONSE_BYTES:
+                    encoded = None
+                    break
+                encoded.extend(part)
+            payload = bytes(encoded) if encoded is not None else None
+        if payload is None or len(payload) > self.MAX_RESPONSE_BYTES:
+            status, content_type = HTTPStatus.SERVICE_UNAVAILABLE, 'application/json'
+            payload = b'{"error":"MIRROR_RESPONSE_TOO_LARGE"}'
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
@@ -165,7 +191,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(HTTPStatus.BAD_REQUEST, {"error": "QUERY_DENIED"})
                 return
             try:
-                data = self.server.mirror.inventory(remote=url.query == "remote=true")
+                data = self.server.core.owner_inventory(remote=url.query == "remote=true")
             except ObservationError as exc:
                 self.send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc), "repositories": None})
                 return
@@ -261,25 +287,9 @@ class Handler(BaseHTTPRequestHandler):
             if action == 'check-windows':
                 if body:
                     raise PullDenied('OWNER_CHECK_FIELDS_INVALID')
-                # The owner-local and separate Gateway listeners can share one
-                # PullWorker. Its per-clone lock also fences a metadata fetch
-                # against a Gateway Pull for the same Windows Git directory.
-                worker_lock = self.server.browser_pull._worker()._repo_lock(repo_id)
-                if not worker_lock.acquire(blocking=False):
-                    raise PullDenied('REPOSITORY_OPERATION_PENDING')
-                try:
-                    safety = self.server.browser_pull.safety(repo_id)
-                    # An unresolved effect permits observation, never another
-                    # metadata fetch, including after owner session restart.
-                    data = (self.server.mirror.inventory(remote=True, repo=repo_id) if safety['blocked']
-                            else self.server.mirror.check_repository(repo_id))
-                    if len(data.get('repositories', [])) != 1 or data['repositories'][0].get('repoId') != repo_id:
-                        raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
-                    result = {"schemaVersion": 1, "checkedAt": data['checkedAt'],
-                              "repository": data['repositories'][0]}
-                    result['repository']['pullSafety'] = safety
-                finally:
-                    worker_lock.release()
+                data = self.server.core.check_repository(repo_id)
+                result = {"schemaVersion":1, "checkedAt":data['checkedAt'],
+                          "repository":data['repositories'][0]}
             elif action == "pull-preview":
                 if body:
                     raise PullDenied("PULL_PREVIEW_FIELDS_INVALID")
@@ -303,9 +313,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class GatewayHandler(Handler):
+    MAX_RESPONSE_BYTES = 262144
     """Separate TLS-only Gateway route surface; browser cookie is never accepted."""
     def authorized(self):
-        token = self.headers.get("Authorization", "")
+        tokens = self.headers.get_all("Authorization", [])
+        if len(tokens) != 1 or len(tokens[0]) > 300:
+            return False
+        token = tokens[0]
         expected = "Bearer " + self.server.gateway_secret
         return hmac.compare_digest(token, expected)
 
@@ -323,26 +337,20 @@ class GatewayHandler(Handler):
         if not self.authorized():
             self.send(HTTPStatus.UNAUTHORIZED, {"error": "GATEWAY_AUTH_REQUIRED"})
             return
+        if self.headers.get('Host') not in TRUSTED_HTTP_HOSTS:
+            self.send(HTTPStatus.FORBIDDEN, {'error':'GATEWAY_HOST_DENIED'})
+            return
         url = urlsplit(self.path)
         ident = self.identity(url.path)
-        if url.query or ident is None:
+        if url.query or url.fragment or ident is None:
             self.send(HTTPStatus.NOT_FOUND, {"error": "GATEWAY_ROUTE_DENIED"})
             return
         repo_id, remainder = ident
-        if remainder.startswith("/pull-results/"):
-            request_id = remainder.removeprefix("/pull-results/")
-            try:
-                result = self.server.worker.status(request_id, repo_id=repo_id)
-            except PullDenied as exc:
-                self.send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                return
-            self.send(HTTPStatus.OK, result)
-            return
         if remainder:
             self.send(HTTPStatus.NOT_FOUND, {"error": "GATEWAY_ROUTE_DENIED"})
             return
         try:
-            data = self.server.mirror.inventory(remote=False)
+            data = self.server.mirror.inventory(remote=False, repo=repo_id)
         except ObservationError as exc:
             self.send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
@@ -354,47 +362,14 @@ class GatewayHandler(Handler):
 
     def do_POST(self):
         if not self.authorized():
-            self.send(HTTPStatus.UNAUTHORIZED, {"error": "GATEWAY_AUTH_REQUIRED"})
+            self.send(HTTPStatus.UNAUTHORIZED, {"error":"GATEWAY_AUTH_REQUIRED"})
             return
-        url = urlsplit(self.path)
-        ident = self.identity(url.path)
-        if url.query or ident is None or ident[1] != "/pull-main":
-            self.send(HTTPStatus.NOT_FOUND, {"error": "GATEWAY_ROUTE_DENIED"})
-            return
-        if self.headers.get("Content-Type") != "application/json":
-            self.send(HTTPStatus.BAD_REQUEST, {"error": "JSON_REQUIRED"})
-            return
-        try:
-            size = int(self.headers.get("Content-Length", "0"))
-            if not 0 < size <= 4096:
-                raise ValueError()
-            raw = self.rfile.read(size)
-            if len(raw) != size:
-                raise ValueError()
-            def strict(items):
-                result = {}
-                for key, value in items:
-                    if key in result:
-                        raise ValueError()
-                    result[key] = value
-                return result
-            payload = json.loads(raw, object_pairs_hook=strict)
-            if payload.get("requestId") != self.headers.get("Idempotency-Key"):
-                raise ValueError()
-        except (ValueError, TypeError, UnicodeError, AttributeError):
-            self.send(HTTPStatus.BAD_REQUEST, {"error": "PULL_REQUEST_INVALID"})
-            return
-        try:
-            result = self.server.worker.run(payload, repo_id=ident[0], allowed_repos=self.server.allowed_repos)
-        except PullDenied as exc:
-            self.send(HTTPStatus.CONFLICT, {"error": str(exc)})
-            return
-        self.send(HTTPStatus.OK, result)
+        self.send(HTTPStatus.METHOD_NOT_ALLOWED, {"error":"GATEWAY_READ_ONLY"})
 
     do_PUT = do_PATCH = do_DELETE = Handler.do_PUT
 
 
-def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, receipt_db, *, shared_worker=None):
+def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, receipt_db, *, core=None):
     if not cert or not key or not secret_file or not allowed_repos:
         raise ValueError("GATEWAY_TLS_AUTH_CONFIG_REQUIRED")
     token = Path(secret_file).read_text(encoding="ascii").strip()
@@ -402,10 +377,10 @@ def gateway_server(mirror, bind, port, cert, key, secret_file, allowed_repos, re
         raise ValueError("GATEWAY_SECRET_INVALID")
     server = ThreadingHTTPServer((bind, port), GatewayHandler)
     server.daemon_threads = True
-    server.mirror = mirror
+    server.core = core if core is not None else MirrorCore(mirror, receipt_db, read_only=True)
+    server.mirror = server.core
     server.gateway_secret = token
     server.allowed_repos = frozenset(allowed_repos)
-    server.worker = shared_worker if shared_worker is not None else PullWorker(mirror, receipt_db)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=cert, keyfile=key)
@@ -471,7 +446,7 @@ def main(argv=None):
         external = gateway_server(server.mirror, args.gateway_bind, args.gateway_port,
             args.gateway_cert, args.gateway_key, args.gateway_secret_file,
             args.gateway_repo, args.gateway_receipt_db,
-            shared_worker=server.browser_pull._worker())
+            core=server.core)
         threading.Thread(target=external.serve_forever, daemon=True).start()
     print(f"Open locally: http://127.0.0.1:{args.port}/session?boot={server.bootstrap_token}", flush=True)
     if args.open_browser:

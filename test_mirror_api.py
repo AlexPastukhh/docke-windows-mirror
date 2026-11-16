@@ -287,7 +287,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.assertNotEqual(0,subprocess.run(['git','-C',str(self.clone),'cat-file','-e',
                               self.new+'^{commit}'],stderr=subprocess.DEVNULL).returncode)
         inv, gateway = self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner):
             read_only=self.mirror.inventory(remote=True,repo='sample')['repositories'][0]
             self.assertEqual('unknown',read_only['windows']['relation'])
             self.assertFalse(self.fetches,'Read-only inventory must not fetch')
@@ -312,7 +312,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         unrelated='f'*40
         self.base_primary['head']=unrelated
         inv,gateway=self.scoped(target=unrelated)
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual(1,len(self.fetches))
         self.assertEqual('FAILED',checked['windows']['fetchStatus'])
@@ -327,7 +327,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.gateway['mainHistory']={'head':self.new,'candidate':self.old,
                                      'relation':'behind','examined':2}
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner), \
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner), \
              mock.patch('mirror_api.operations.docker_relation_to_sha') as docker_git:
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual(1,len(self.fetches))
@@ -349,7 +349,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.git(self.clone,'merge','--ff-only',self.new)
         self.base_primary['head']=self.old
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual([],self.fetches)
         self.assertEqual('NOT_NEEDED',checked['windows']['fetchStatus'])
@@ -362,7 +362,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.fetches=[];self.real_run=subprocess.run
         (self.clone/'notes.txt').write_text('local dirty change\n')
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual([],self.fetches)
         self.assertEqual('SKIPPED',checked['windows']['fetchStatus'])
@@ -371,7 +371,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
         self.git(self.clone,'checkout','--','notes.txt')
         self.git(self.clone,'remote','set-url','origin','https://example.invalid/foreign.git')
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=self.offline_fetch_runner):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=self.offline_fetch_runner):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual([],self.fetches)
         self.assertFalse(checked['windows']['originValid'])
@@ -385,7 +385,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv,128,b'',b'FAIL')
             return self.real_run(argv,**kwargs)
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=failed):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=failed):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual('WINDOWS_FETCH_FAILED',checked['windows']['fetchError'])
         self.assertEqual('unknown',checked['windows']['relation'])
@@ -396,7 +396,7 @@ class OwnerCheckFetchTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(argv,45)
             return self.real_run(argv,**kwargs)
         inv,gateway=self.scoped()
-        with inv,gateway,mock.patch('mirror_api.operations.subprocess.run',side_effect=timed_out):
+        with inv,gateway,mock.patch('mirror_api.operations.command',side_effect=timed_out):
             checked=self.mirror.check_repository('sample')['repositories'][0]
         self.assertEqual('WINDOWS_FETCH_TIMEOUT',checked['windows']['fetchError'])
         self.assertEqual('unknown',checked['windows']['relation'])
@@ -459,6 +459,7 @@ class ReadbackRetryTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='mirror-ux-readback-')
         self.addCleanup(tmp.cleanup)
         base = Path(tmp.name)
+        (base / 'Repos').mkdir(exist_ok=True)
         self.worker = PullWorker(Mirror(base / 'Repos'), base / 'receipts.sqlite')
         self.origin = 'https://github.com/AlexPastukhh/sample.git'
         self.target = 'c' * 40
@@ -468,7 +469,7 @@ class ReadbackRetryTests(unittest.TestCase):
                  'clean': False, 'originValid': True}
         clean = dict(dirty, clean=True)
         with mock.patch('mirror_api.pull.windows_status', side_effect=[dirty, clean]) as check, \
-             mock.patch('mirror_api.pull.subprocess.run') as no_git, \
+             mock.patch('mirror_api.pull.command') as no_git, \
              mock.patch('mirror_api.pull.time.sleep') as sleep:
             self.worker._confirmed_readback('sample', self.origin, self.target)
         self.assertEqual(2, check.call_count)
@@ -480,7 +481,7 @@ class ReadbackRetryTests(unittest.TestCase):
         wrong = {'error': None, 'head': 'd'*40, 'branch': 'task/other',
                  'clean': False, 'originValid': False}
         with mock.patch('mirror_api.pull.windows_status', return_value=wrong) as check, \
-             mock.patch('mirror_api.pull.subprocess.run') as no_git, \
+             mock.patch('mirror_api.pull.command') as no_git, \
              mock.patch('mirror_api.pull.time.sleep') as sleep:
             with self.assertRaises(PullReadbackUnconfirmed) as failure:
                 self.worker._confirmed_readback('sample', self.origin, self.target)
@@ -514,6 +515,7 @@ class DurablePullTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
+        (base / 'Repos').mkdir(exist_ok=True)
         self.worker = PullWorker(Mirror(base / 'Repos'), base / 'runtime' / 'receipts.sqlite')
         self.payload = {'requestId': '12345678-1234-4234-8234-123456789abc',
                         'repoId': 'fixture', 'expectedHead': 'a'*40,
@@ -546,14 +548,14 @@ class DurablePullTests(unittest.TestCase):
             'branch':'main','head':self.payload['expectedHead'],
             'clean':True,'targetEligible':True}]}
         with mock.patch('mirror_api.pull.docker_inventory',return_value=registered), \
-             mock.patch('mirror_api.pull.subprocess.run') as fetch:
+             mock.patch('mirror_api.pull.command') as fetch:
             result=self.worker.run(self.payload,repo_id='fixture',allowed_repos={'fixture'})
         self.assertEqual('UNCERTAIN',result['state'])
         self.assertEqual('DOCKER_MAIN_NOT_AT_TARGET',result['error'])
         fetch.assert_not_called()
 
     def test_preflight_never_fetches_without_docker_registration(self):
-        with mock.patch('mirror_api.pull.docker_inventory', return_value={}), mock.patch('mirror_api.pull.subprocess.run') as fetch:
+        with mock.patch('mirror_api.pull.docker_inventory', return_value={}), mock.patch('mirror_api.pull.command') as fetch:
             result = self.worker.run(self.payload, repo_id='fixture', allowed_repos={'fixture'})
         self.assertEqual('UNCERTAIN', result['state'])
         fetch.assert_not_called()
@@ -666,7 +668,7 @@ class RealGitFastForwardFixture(unittest.TestCase):
                 'head':target, 'clean':True, 'targetEligible':True}]}
             with mock.patch('mirror_api.pull.docker_inventory',return_value=registered), \
                 mock.patch('mirror_api.pull.github_main',return_value={'head':target,'error':None}), \
-                mock.patch('mirror_api.pull.subprocess.run',side_effect=local_fetch):
+                mock.patch('mirror_api.pull.command',side_effect=local_fetch):
                 first=worker.run(request,repo_id='sample',allowed_repos={'sample'})
                 second=worker.run(request,repo_id='sample',allowed_repos={'sample'})
             self.assertEqual('EXECUTED',first['state'],str(first))
@@ -679,6 +681,7 @@ class PullReconcileTests(unittest.TestCase):
     def test_known_pre_merge_failure_can_be_resolved_without_new_fetch(self):
         from mirror_api.pull import PullWorker
         with tempfile.TemporaryDirectory() as folder:
+            (Path(folder)/'Repos').mkdir()
             worker=PullWorker(Mirror(Path(folder)/'Repos'),Path(folder)/'state.sqlite')
             value={'requestId':'12345678-1234-4234-8234-123456789abc',
                    'repoId':'fixture','expectedHead':'a'*40,'targetSha':'b'*40,
@@ -706,7 +709,7 @@ class GatewayAuthenticatedRoutes(unittest.TestCase):
         self.server.gateway_secret='q'*40
         self.server.allowed_repos={'fixture'}
         class Fake:
-            def inventory(self,remote=False):
+            def inventory(self,remote=False,repo=None):
                 return {'repositories':[{'repoId':'fixture','docker':{},'windows':{},'github':{},'actions':{}}]}
         self.server.mirror=Fake()
         class Worker:
@@ -726,7 +729,7 @@ class GatewayAuthenticatedRoutes(unittest.TestCase):
 
     def request(self,method,path,value=None,headers=None):
         conn=HTTPConnection('127.0.0.1',self.server.server_port,timeout=5)
-        hdr={'Authorization':'Bearer '+'q'*40}
+        hdr={'Authorization':'Bearer '+'q'*40,'Host':'host.docker.internal'}
         if headers:hdr.update(headers)
         data=None if value is None else json.dumps(value)
         conn.request(method,path,body=data,headers=hdr)
@@ -741,12 +744,12 @@ class GatewayAuthenticatedRoutes(unittest.TestCase):
         p={'requestId':'12345678-1234-4234-8234-123456789abc','repoId':'fixture',
            'expectedHead':'a'*40,'targetSha':'b'*40,'origin':'https://github.com/AlexPastukhh/fixture.git'}
         headers={'Content-Type':'application/json'}
-        self.assertEqual(400,self.request('POST','/gateway/v1/repositories/fixture/pull-main',p,headers)[0])
+        self.assertEqual(405,self.request('POST','/gateway/v1/repositories/fixture/pull-main',p,headers)[0])
         headers['Idempotency-Key']=p['requestId']
         status,value=self.request('POST','/gateway/v1/repositories/fixture/pull-main',p,headers)
-        self.assertEqual(200,status)
-        self.assertEqual('EXECUTED',value['state'])
-        self.assertEqual(404,self.request('POST','/gateway/v1/repositories/unlisted/pull-main',p,headers)[0])
+        self.assertEqual(405,status)
+        self.assertEqual('GATEWAY_READ_ONLY',value['error'])
+        self.assertEqual(405,self.request('POST','/gateway/v1/repositories/unlisted/pull-main',p,headers)[0])
 
 class CrossProcessReservationTests(unittest.TestCase):
     def test_pending_same_repo_blocks_other_request_id(self):
@@ -764,6 +767,6 @@ class CrossProcessReservationTests(unittest.TestCase):
             second=PullWorker(Mirror(root/'Repos'),root/'receipts.sqlite')
             next_value={**value,'requestId':'22345678-1234-4234-8234-123456789abc'}
             with mock.patch.object(second,'_execute') as mutate:
-                with self.assertRaisesRegex(PullDenied,'REPOSITORY_OPERATION_PENDING'):
-                    second.run(next_value,repo_id='fixture',allowed_repos={'fixture'})
+                refused=second.run(next_value,repo_id='fixture',allowed_repos={'fixture'})
+                self.assertEqual(('FAILED','REPOSITORY_OPERATION_PENDING'), (refused['state'],refused['error']))
                 mutate.assert_not_called()

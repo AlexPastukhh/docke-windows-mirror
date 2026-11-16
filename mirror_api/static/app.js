@@ -256,7 +256,7 @@ function pullBlockers(row) {
   if (row?.pullSafety?.blocked) return PULL_BLOCKER_TEXT.PREVIOUS_PULL_UNRESOLVED;
   if (!row || !row.actions || !row.actions.pull_main_browser) return 'Сначала выполните проверку выбранного репозитория';
   const action = row.actions.pull_main_browser;
-  if (action.available === true) return 'Предварительные условия выполнены; окончательное разрешение только после свежего Preview';
+  if (action.available === true) return 'Можно запросить Preview; перед выполнением условия и доступность записи проверяются повторно';
   if (!Array.isArray(action.reasons) || !action.reasons.length) return 'Причина не подтверждена, повторите проверку';
   return action.reasons.map(reason => PULL_BLOCKER_TEXT[reason] || ('Проверка не пройдена: ' + reason)).join('; ');
 }
@@ -374,7 +374,7 @@ function rowDetails(row) {
     'Ручной Windows Pull (оценка): ' + (row.pullSafety?.blocked ? 'заблокирован предыдущим Pull' :
       pullEligible(row) ? 'можно запросить свежий Preview' :
       'Preview / проверки требуются') +
-      ' · окончательное решение принимает только свежий серверный Preview',
+      ' · перед выполнением условия проверяются повторно',
     'Почему Windows Pull недоступен: ' + pullBlockers(row),
     'Незавершённых Pull: ' + (row.pullSafety ? show(row.pullSafety.pendingCount) : 'НЕ ПРОВЕРЕНО'),
     'Windows fetch: ' + show(w.fetchStatus) +

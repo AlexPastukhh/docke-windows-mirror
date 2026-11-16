@@ -4,50 +4,44 @@ No arbitrary Git commands, paths, branches or URLs are accepted from HTTP.
 The owner authorizes one exact preview on the local Windows browser; remote
 AI effects remain isolated behind the separately configured Gateway listener.
 """
-import os
-import sqlite3
-from pathlib import Path
 import threading
 import time
 import uuid
 
 from .operations import REPO, SHA, ObservationError
-from .pull import PullDenied, PullWorker, UUID
+from .pull import PullDenied, UUID
 
 
 class BrowserPull:
     PREVIEW_SECONDS = 120
     STATUS_SECONDS = 3600
     MAX_PENDING = 64
+    MAX_REQUESTS = 256
 
-    def __init__(self, mirror, receipt_db=None, *, clock=None):
-        self.mirror = mirror
-        self.receipt_db = Path(receipt_db) if receipt_db is not None else None
+    def __init__(self, mirror, receipt_db=None, *, clock=None, core=None):
+        from .core import MirrorCore
+        self.core = core if core is not None else MirrorCore(mirror, receipt_db)
+        self.mirror = self.core.backend
+        self.receipt_db = self.core.receipt_db
         self.clock = clock or time.monotonic
         self.lock = threading.Lock()
         self.previews = {}
         self.requests = {}
-        self.worker = None
 
     @property
     def configured(self):
-        # The receipt store must be durable and user-local, never in Git source.
-        return self.receipt_db is not None or bool(os.environ.get('LOCALAPPDATA'))
+        return self.core.configured
+
+    @property
+    def worker(self):
+        return self.core._worker
+
+    @worker.setter
+    def worker(self, value):
+        self.core._worker = value
 
     def _worker(self):
-        with self.lock:
-            if self.worker is None:
-                target = self.receipt_db
-                if target is None:
-                    root = os.environ.get('LOCALAPPDATA', '')
-                    if not root or not os.path.isabs(root):
-                        raise PullDenied('PULL_RECEIPT_STORAGE_UNAVAILABLE')
-                    target = Path(root) / 'FortisMirror' / 'pull-receipts.sqlite3'
-                try:
-                    self.worker = PullWorker(self.mirror, target)
-                except (OSError, ValueError, sqlite3.Error):
-                    raise PullDenied('PULL_RECEIPT_STORAGE_UNAVAILABLE') from None
-            return self.worker
+        return self.core.worker()
 
     def _purge(self, now):
         for key, item in list(self.previews.items()):
@@ -58,77 +52,19 @@ class BrowserPull:
                 del self.requests[key]
 
     def safety(self, repo_id):
-        if not self.configured:
-            return {'blocked': False, 'pendingCount': 0}
-        return self._worker().safety(repo_id)
+        return self.core.safety(repo_id)
 
     def preview(self, repo_id, session):
         if type(repo_id) is not str or not REPO.fullmatch(repo_id) or not session:
             raise PullDenied('REPOSITORY_NOT_ALLOWED')
-        # Include receipt-store initialization in the server Preview duration.
-        started = time.perf_counter()
-        self._worker()
-        data = self.mirror.inventory(remote=True, repo=repo_id)
-        items = data.get('repositories')
-        if type(items) is not list or len(items) != 1 or items[0].get('repoId') != repo_id:
-            raise PullDenied('DOCKER_REPOSITORY_NOT_REGISTERED')
-        row = items[0]
-        primary = row.get('docker', {}).get('primary') or {}
-        windows = row.get('windows') or {}
-        github = row.get('github') or {}
-        reasons = ['PREVIOUS_PULL_UNRESOLVED'] if self.safety(repo_id)['blocked'] else []
-        if (primary.get('kind') != 'primary' or primary.get('branch') != 'main' or
-                primary.get('targetEligible') is not True or
-                primary.get('status') != 'registered' or primary.get('clean') is not True):
-            reasons.append('DOCKER_MAIN_NOT_VERIFIED')
-        origin = primary.get('origin')
-        if not isinstance(origin, str) or not origin:
-            reasons.append('DOCKER_ORIGIN_UNVERIFIED')
-        if windows.get('error') or windows.get('exists') is not True:
-            reasons.append(windows.get('error') or 'WINDOWS_CLONE_NOT_VERIFIED')
-        if windows.get('branch') != 'main':
-            reasons.append('WINDOWS_NOT_ON_MAIN')
-        if windows.get('clean') is not True:
-            reasons.append('WINDOWS_NOT_CLEAN')
-        if windows.get('originValid') is not True or windows.get('origin') != origin:
-            reasons.append('WINDOWS_ORIGIN_MISMATCH')
-        head = windows.get('head')
-        if type(head) is not str or not SHA.fullmatch(head):
-            reasons.append('WINDOWS_HEAD_UNVERIFIED')
-        target = github.get('head')
-        if github.get('error') or type(target) is not str or not SHA.fullmatch(target):
-            reasons.append('GITHUB_MAIN_UNVERIFIED')
-        if primary.get('head') != target:
-            reasons.append('DOCKER_MAIN_NOT_AT_GITHUB_MAIN')
-        if head == target and target is not None:
-            reasons.append('WINDOWS_ALREADY_CURRENT')
-        relation = windows.get('relation', 'unknown')
-        if relation in ('ahead', 'diverged'):
-            reasons.append('WINDOWS_NOT_BEHIND_GITHUB')
-        if relation == 'equal' and head != target:
-            reasons.append('WINDOWS_RELATION_INCONSISTENT')
-        result = {
-            'repoId': repo_id, 'available': not reasons,
-            'windowsHead': head, 'targetSha': target,
-            'dockerHead': primary.get('head'), 'origin': origin,
-            'relation': relation, 'reasons': list(dict.fromkeys(reasons)),
-            'requiredCI': github.get('requiredCI', 'NOT_VERIFIED'),
-            'fastForward': 'TO_BE_VERIFIED_AFTER_FETCH' if relation == 'unknown' else relation,
-            'previewId': None, 'requestId': None, 'expiresInSeconds': 0,
-            'timingsMs': {'previewTotal': round((time.perf_counter() - started) * 1000)},
-        }
-        # The underlying inventory contains independent timings for the same
-        # single repo. They are diagnostic only, never part of authorization.
-        observed = row.get('readTimingsMs') or {}
-        for source, key in (('dockerInventory', 'previewDocker'),
-                            ('windowsGit', 'previewWindows'),
-                            ('githubGateway', 'previewGateway'),
-                            ('gitAncestry', 'previewAncestry')):
-            value = observed.get(source)
-            if type(value) in (int, float) and 0 <= value <= 600000:
-                result['timingsMs'][key] = round(value)
-        if reasons:
+        with self.lock:
+            self._purge(self.clock())
+            if len(self.requests) >= self.MAX_REQUESTS:
+                raise PullDenied('PULL_RECEIPT_LOOKUP_LIMIT_REACHED')
+        result = self.core.preview(repo_id)
+        if not result['available']:
             return result
+        head, target, origin = result['windowsHead'], result['targetSha'], result['origin']
         item = {
             'session': session, 'repoId': repo_id, 'windowsHead': head,
             'targetSha': target, 'origin': origin, 'expires': self.clock() + self.PREVIEW_SECONDS,
@@ -138,6 +74,8 @@ class BrowserPull:
             self._purge(now)
             if len(self.previews) >= self.MAX_PENDING:
                 raise PullDenied('PULL_PREVIEW_LIMIT_REACHED')
+            if len(self.requests) >= self.MAX_REQUESTS:
+                raise PullDenied('PULL_RECEIPT_LOOKUP_LIMIT_REACHED')
             preview_id = str(uuid.uuid4())
             request_id = str(uuid.uuid4())
             item['requestId'] = request_id
@@ -166,7 +104,7 @@ class BrowserPull:
         body = {'requestId': item['requestId'], 'repoId': repo_id,
                 'expectedHead': item['windowsHead'],
                 'targetSha': item['targetSha'], 'origin': item['origin']}
-        return self._worker().run(body, repo_id=repo_id, allowed_repos=frozenset({repo_id}))
+        return self.core.execute(body, repo_id)
 
     def status(self, repo_id, session, request_id):
         if type(request_id) is not str or not UUID.fullmatch(request_id):

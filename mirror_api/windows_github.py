@@ -166,7 +166,8 @@ class WindowsGitHub:
         if not executable or not os.path.isabs(executable):
             raise GitHubReadError('GITHUB_CLI_UNAVAILABLE')
         self.executable, self.repo = executable, repo
-        self.deadline = time.monotonic() + SNAPSHOT_SECONDS
+        from .commands import remaining
+        self.deadline = time.monotonic() + remaining(SNAPSHOT_SECONDS)
         self.main_sha = None
         self.verified = False
 

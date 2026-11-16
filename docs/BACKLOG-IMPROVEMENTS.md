@@ -15,8 +15,10 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
   fixed GET/identity/pipe limits и regression fixtures. Подтвердить реальные
   Git/GCM/gh scopes, browser main/PR/CI и независимость от Gateway на Windows
   по [Windows GitHub reader](WINDOWS-GITHUB-READ.md), без остановки Gateway.
-- P2: один Core/worker/receipt и process guard; сохранить существующий общий
-  browser check/Pull mutex, проверить crash/UNCERTAIN и все пути второго writer.
+- P2 source candidate: [единый Core/worker/store](MIRROR_CORE_P2.md), root/process
+  guard, привязка ledger и контролируемые дочерние процессы. Сохранены per-clone
+  mutex и запрет replay. Linux fixtures проверены; Windows CI и owner-host
+  qualification/cutover остаются отдельными gates. Runtime не изменялся.
 - P3: typed v2 READ при сохранённом strict v1; отдельные source CI,
   Windows install, Gateway release и fresh live READ с отрицательными probes.
 - P4: signed ASK dispatch, deny legacy POST, principal-bound lookup и один
@@ -26,7 +28,7 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
 - Windows-only inventory из открытого Approvals PR #87 — отдельный scope;
   не расширять зарегистрированные пары и права автоматически.
 
-## Mirror UX / readback — source в task (до merge и Windows acceptance)
+## Mirror UX / readback — source принят, частичная Windows acceptance
 
 - Компактная таблица: независимо сворачиваемые группы Docker/Windows,
   сохранение размеров каждого столбца в браузере, поиск и фильтр действий,
@@ -50,8 +52,10 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
   оставшийся UNCERTAIN блокируют новый UUID; P2 process guard ещё не принят.
 - После restart — внутренняя repo-scoped сверка без доступа новой сессии к
   старой квитанции. Неизвестный исход блокирует Preview/metadata fetch.
-- Source/fixture checks не подтверждают установленную Windows runtime.
-  Требуется owner acceptance по [runbook](WINDOWS-GITHUB-READ.md#pull-failure-recovery--source-follow-up-2026-11-16).
+- PR #25/#26 приняты. После обновления Windows clone владелец 2026-11-16
+  сообщил «всё работает» для ранее заблокированного Browser Pull. Это базовая
+  owner-reported проверка, не полный протокол негативных/PR/CI сценариев по
+  [runbook](WINDOWS-GITHUB-READ.md#pull-failure-recovery--source-follow-up-2026-11-16).
 
 ## Производительность основной проверки — 2026-11-09
 
@@ -88,8 +92,8 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
 
 ## Не завершённое внедрение и acceptance
 
-- Windows browser/API запуск из принятого `main`, фактическая inventory/PR/CI
-  проверка и freshness/error cases пока не подтверждены owner-run результатом.
+- Базовый запуск Browser/Pull подтверждён сообщением владельца выше; полный
+  протокол inventory/PR/CI, freshness/error cases пока не подтверждён.
   Повторяемая процедура — [MANUAL-PREVIEW](MANUAL-PREVIEW.md); результат проверки
   не подменяется наличием кода или CI.
 - Source для owner-local **Browser Pull Windows main** с одноразовым Preview,

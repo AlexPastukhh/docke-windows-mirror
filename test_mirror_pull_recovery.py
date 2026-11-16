@@ -17,6 +17,7 @@ class PullRecoveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.mirror = FakeMirror()
         self.mirror.windows_root = Path(self.tmp.name) / 'Repos'
+        self.mirror.windows_root.mkdir(exist_ok=True)
         self.path = Path(self.tmp.name) / 'receipts.sqlite'
         self.worker = PullWorker(self.mirror, self.path)
         self.body = {'requestId':REQUEST_ID, 'repoId':'sample', 'expectedHead':OLD,
@@ -38,7 +39,7 @@ class PullRecoveryTests(unittest.TestCase):
         with mock.patch('mirror_api.pull.docker_inventory', return_value={'sample':docker}), \
              mock.patch('mirror_api.pull.windows_status', return_value=self.observed), \
              mock.patch('mirror_api.pull.github_main', return_value={'head':NEW, 'error':None}), \
-             mock.patch('mirror_api.pull.subprocess.run', return_value=failed) as git:
+             mock.patch('mirror_api.pull.command', return_value=failed) as git:
             first = self.worker.run(self.body, repo_id='sample', allowed_repos={'sample'})
             second = self.worker.run(self.body, repo_id='sample', allowed_repos={'sample'})
         self.assertEqual('FAILED', first['state'])
@@ -70,9 +71,9 @@ class PullRecoveryTests(unittest.TestCase):
             self.assertEqual('UNCERTAIN', result['state'])
             self.assertTrue(other.safety('sample')['blocked'])
             with mock.patch.object(other, '_execute') as effect:
-                with self.assertRaisesRegex(PullDenied, 'REPOSITORY_OPERATION_PENDING'):
-                    other.run({**self.body, 'requestId':'22345678-1234-4234-8234-123456789abc'},
-                              repo_id='sample', allowed_repos={'sample'})
+                refused = other.run({**self.body, 'requestId':'22345678-1234-4234-8234-123456789abc'},
+                                    repo_id='sample', allowed_repos={'sample'})
+                self.assertEqual(('FAILED','REPOSITORY_OPERATION_PENDING'), (refused['state'],refused['error']))
                 effect.assert_not_called()
 
     def test_merge_started_with_old_head_remains_uncertain_and_reports_fresh_observation(self):
@@ -112,6 +113,7 @@ class PullRecoveryTests(unittest.TestCase):
         self.seed(error='WINDOWS_FETCH_FAILED')
         fresh = BrowserPull(self.mirror, self.path)
         with mock.patch('mirror_api.pull.windows_status', return_value=self.observed):
+            fresh.safety('sample')
             preview = fresh.preview('sample', 'new-session')
         self.assertTrue(preview['available'])
         with self.assertRaisesRegex(PullDenied, 'PULL_RECEIPT_NOT_OWNED'):
@@ -128,7 +130,7 @@ class PullRecoveryTests(unittest.TestCase):
         current = {**self.observed, 'head':'c'*40}
         self.seed(error='GITHUB_MAIN_CHANGED', timingsMs={'gatewayMain':42})
         with mock.patch('mirror_api.pull.windows_status', return_value=current), \
-             mock.patch('mirror_api.pull.subprocess.run') as git:
+             mock.patch('mirror_api.pull.command') as git:
             result = self.worker.status(REQUEST_ID)
             self.assertFalse(self.worker.safety('sample')['blocked'])
         self.assertEqual('FAILED', result['state'])
@@ -185,6 +187,7 @@ class PullRecoveryTests(unittest.TestCase):
         fresh = BrowserPull(self.mirror, self.path)
         with mock.patch('mirror_api.pull.windows_status', return_value=self.observed), \
              mock.patch.object(fresh._worker(), '_execute') as effect:
+            fresh.safety('sample')
             self.assertTrue(fresh.preview('sample','new-session')['available'])
             effect.assert_not_called()
         with self.assertRaisesRegex(PullDenied, 'PULL_RECEIPT_NOT_OWNED'):

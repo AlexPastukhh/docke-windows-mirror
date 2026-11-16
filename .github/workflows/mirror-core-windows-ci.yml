@@ -1,0 +1,26 @@
+name: Mirror Windows Core CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-core-guards:
+    name: Windows Core and child lifetime guards
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x64'
+      - name: Controlled Windows fixtures only
+        run: python -B -m unittest -v test_mirror_core test_mirror_commands test_mirror_process_guard
