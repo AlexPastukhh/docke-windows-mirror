@@ -10,7 +10,8 @@ import time
 import uuid
 
 from .read_v2 import ReadError, digest, require, source
-from .operations import REPO, SHA
+from .operations import REPO, SHA, ObservationError
+from .pull import PullDenied
 
 ACTOR = re.compile(r'[A-Za-z0-9_.:-]{1,120}\Z')
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
@@ -182,6 +183,60 @@ class MachineReads:
         # Private origin is deliberately NOT part of the public READ envelope.
         return {'readRequestId': row[0], 'origin': row[6], 'snapshot': snapshot}
 
+    def _fresh_signed_preconditions(self, repo, stored):
+        """Bounded read-only semantic revalidation before a new reservation.
+
+        Ignore volatile timestamps/timings; never reissue a preview, change its
+        target or TTL, acquire the writer guard, or use a cached GitHub main.
+        The worker must independently recheck before any Git effect.
+        """
+        original = stored['snapshot']
+        try:
+            facts, row, observed = self.core.preview_observation(repo)
+        except (PullDenied, ObservationError, OSError):
+            raise ReadError('SOURCE_UNAVAILABLE') from None
+        require(type(facts) is dict and facts.get('repoId') == repo and
+                type(facts.get('reasons')) is list, 'PREVIEW_STALE')
+        # The common ledger already fences an unresolved Browser/machine
+        # writer. Preserve the same stable admission refusal in both paths.
+        require('PREVIOUS_PULL_UNRESOLVED' not in facts['reasons'],
+                'REPOSITORY_OPERATION_PENDING')
+        require(facts.get('available') is True and facts['reasons'] == [],
+                'PREVIEW_STALE')
+        require(type(row) is dict and row.get('repoId') == repo,
+                'PREVIEW_STALE')
+        require(facts.get('origin') == stored['origin'] and
+                facts.get('windowsHead') == original['expectedHead'] and
+                facts.get('targetSha') == original['targetSha'] and
+                facts.get('dockerHead') == original['dockerHead'],
+                'PREVIEW_STALE')
+        docker = row.get('docker', {}).get('primary') or {}
+        windows = row.get('windows') or {}
+        github = row.get('github') or {}
+        require(all(type(item) is dict and item.get('repoId') == repo
+                    for item in (docker, windows, github)), 'PREVIEW_STALE')
+        require(docker.get('kind') == 'primary' and
+                docker.get('status') == 'registered' and
+                docker.get('targetEligible') is True and
+                docker.get('origin') == stored['origin'] and
+                windows.get('exists') is True and
+                windows.get('originValid') is True and
+                windows.get('origin') == stored['origin'] and
+                github.get('githubRepository') == repo, 'PREVIEW_STALE')
+        refreshed = {
+            'docker': source(docker, kind='docker', timestamp=observed),
+            'windows': source(windows, kind='windows', timestamp=observed),
+            'github': source(github, kind='github', timestamp=observed),
+        }
+        # Semantics must not change between preview and ASK. New observation
+        # timestamps are expected and are deliberately not equality inputs.
+        semantic = ('verification', 'head', 'branch', 'clean', 'errorCode')
+        require(all(
+            refreshed[name]['verification'] == 'VERIFIED' and
+            all(refreshed[name].get(field) == original['sourceEvidence'][name].get(field)
+                for field in semantic)
+            for name in ('docker', 'windows', 'github')), 'PREVIEW_STALE')
+
     def reserve_signed_candidate(self, *, dispatch, actor, repo, request_id,
                                  gateway_generation, owner_pins):
         """P4 source-only candidate: one atomic binding + receipt reservation.
@@ -252,6 +307,18 @@ class MachineReads:
             dispatch, authenticated_actor=actor, route_repo=repo,
             route_request_id=request_id, persisted_preview=stored,
             owner_pins=owner_pins, now=int(self.clock()))
+        try:
+            self._fresh_signed_preconditions(repo, stored)
+        except ReadError:
+            # A parallel identical request may have committed the durable
+            # reservation during fresh observation. It is lookup-only, never
+            # a second proof/preview refresh or a second writer.
+            with self.worker._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                prior = existing(db)
+                if prior is not None:
+                    return prior
+            raise
         expected = dict(requestId=request_id, repoId=repo,
                         expectedHead=verified.expected_head,
                         targetSha=verified.target_sha, origin=verified.origin)
