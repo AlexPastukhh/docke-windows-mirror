@@ -1,4 +1,7 @@
-# Mirror READ v2 — P3 source candidate
+# Mirror READ v2 — accepted P3 source
+
+P3a (Mirror #30 / Approvals #106) and P3b (Mirror #31 / Approvals #108)
+are owner-merged source. Current stages and remaining work: [plan](BACKLOG-IMPROVEMENTS.md).
 
 P3a supplies six observations and P3b adds bound preview/lookup from the [closed catalog](unified-api/contract.json):
 list repositories, repository snapshot, worktrees, GitHub status, available actions,
@@ -63,7 +66,8 @@ through source merge.
 
 Gateway obtains actor from the persisted, authenticated Core request row only
 in execute/reconcile, verifies operation/target/params/UUID, and derives the peer
-generation from the trusted definition digest and READ credential generation.
+generation from the trusted definition digest, admitted Core policy version
+and READ credential generation.
 It supplies `principal`, `request_id`, `gateway_generation` on the internal
 preview GET; lookup supplies `principal` only and takes the effect UUID from the
 fixed route. These fields are forbidden in public params. Duplicate keys and
