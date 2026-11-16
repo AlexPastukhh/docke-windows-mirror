@@ -245,6 +245,22 @@ class PullWorker:
         if changed != 1:
             raise PullDenied('PULL_RECEIPT_RESERVATION_REQUIRED')
 
+    @staticmethod
+    def _reservation_blocker(db, repo_id):
+        """Shared Browser/machine check INSIDE BEGIN IMMEDIATE.
+
+        A single durable ledger arbitrates per-clone unresolved writers even
+        across separate processes; the process guard remains a second barrier
+        for actual Git effects. Never infer that DISPATCHED was completed.
+        """
+        pending = db.execute("SELECT payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')")
+        for index, item in enumerate(pending):
+            if index >= 4096:
+                return 'PULL_HISTORY_LIMIT_REACHED'
+            if json.loads(item[0])['repoId'] == repo_id:
+                return 'REPOSITORY_OPERATION_PENDING'
+        return None
+
     def run(self, body, *, repo_id, allowed_repos):
         value = self.payload(body)
         if value["repoId"] != repo_id or repo_id not in allowed_repos:
@@ -265,16 +281,11 @@ class PullWorker:
                     if row[0] != frozen:
                         raise PullDenied("REQUEST_ID_CONFLICT")
                 else:
-                    # A separate Mirror process using the same receipt DB must not
-                    # start another Pull on this clone while the first is dispatched.
-                    pending = db.execute("SELECT payload FROM pull_receipts WHERE state IN ('DISPATCHED','UNCERTAIN')")
-                    for index, item in enumerate(pending):
-                        if index >= 4096:
-                            refusal = self._refusal(value, 'PULL_HISTORY_LIMIT_REACHED')
-                            break
-                        if json.loads(item[0])["repoId"] == repo_id:
-                            refusal = self._refusal(value, 'REPOSITORY_OPERATION_PENDING')
-                            break
+                    # Shared guard with P4 atomic machine reservation. Both
+                    # callers use this check in their own immediate transaction.
+                    blocker = self._reservation_blocker(db, repo_id)
+                    if blocker is not None:
+                        refusal = self._refusal(value, blocker)
                     progress = refusal or {'requestId': value['requestId'], 'state': 'DISPATCHED', 'head': None,
                                            'phase': 'PRECHECK', 'mergeStarted': False}
                     db.execute("INSERT INTO pull_receipts VALUES(?,?,?,?)",
