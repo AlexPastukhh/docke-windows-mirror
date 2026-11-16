@@ -107,7 +107,13 @@ class MirrorCore:
         with budget():
             return self._preview(repo_id)
 
-    def _preview(self, repo_id):
+    def preview_observation(self, repo_id):
+        if self.read_only or type(repo_id) is not str or not REPO.fullmatch(repo_id):
+            raise PullDenied('REPOSITORY_NOT_ALLOWED')
+        with budget():
+            return self._preview(repo_id, include_sources=True)
+
+    def _preview(self, repo_id, *, include_sources=False):
         # Include receipt-store initialization in the server Preview duration.
         started = time.perf_counter()
         self.worker()
@@ -170,7 +176,7 @@ class MirrorCore:
             value = observed.get(source)
             if type(value) in (int, float) and 0 <= value <= 600000:
                 result['timingsMs'][key] = round(value)
-        return result
+        return (result, row, data.get('checkedAt')) if include_sources else result
 
     def close(self):
         with self.lock:

@@ -124,7 +124,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/emptyParams"
       },
@@ -160,7 +160,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/lookupParams"
       },

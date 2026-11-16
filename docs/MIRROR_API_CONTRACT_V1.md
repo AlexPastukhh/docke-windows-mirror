@@ -28,9 +28,8 @@ Outstanding work and acceptance gates live in [the backlog](BACKLOG-IMPROVEMENTS
 ## Closed catalog and wire schemas
 
 [contract.json](unified-api/contract.json) maps every operation to its method,
-fixed path, target kind, schemas, effect and intended policy. Six P3a observation
-READs now have `implemented: true` for source readiness. All defaults remain
-`DENY` and `runtimeActivation: false`; preview/lookup/effects remain unimplemented.
+fixed path, target kind, schemas, effect and intended policy. Eight P3 READs now have `implemented: true` for source readiness. All defaults remain
+`DENY` and `runtimeActivation: false`; history-check and Pull effects remain unimplemented.
 This catalog is not a registration/config file for the running Gateway.
 [schemas.json](unified-api/schemas.json) is JSON Schema draft 2020-12 with local
 references only. [validate.py](unified-api/validate.py) checks schema integrity,
@@ -220,8 +219,8 @@ writers are quiescent and activates exactly one writer. Owner controls stop/
 start/rollback; no working process changes in these source PRs.
 
 P0 review/owner merge precedes P1 Windows reader and P2 shared Core. P3a implements six observation READs beside v1; [READ-V2](READ-V2.md)
-records their source/activation boundary. P3b supplies durable principal-bound
-preview/lookup; neither may expose legacy Browser receipts. P4 separately admits signed ASK after security and
+records their source/activation boundary. P3b supplies durable principal-bound preview/lookup without adopting legacy
+Browser receipts; source is distinct from activation. P4 separately admits signed ASK after security and
 live READ gates. P5 changes launchers/cutover only after owner evidence. Each
 source, Windows installation and Gateway image release is separately recorded.
 Compatible upstream source changes do not require a provider/image SHA repin;

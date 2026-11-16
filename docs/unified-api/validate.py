@@ -45,7 +45,7 @@ def main():
         assert type(operation['implemented']) is bool
         if operation['implemented']:
             assert operation['kind'] == 'read'
-            assert operation['logicalOperation'] not in ('preview_windows_pull', 'get_windows_pull_result')
+            assert operation['logicalOperation'] not in ('check_windows_history', 'execute_windows_pull')
         assert operation['defaultPolicy'] == 'DENY'
         assert operation['version'] == '2'
         assert operation['path'].startswith('/gateway/v2/')

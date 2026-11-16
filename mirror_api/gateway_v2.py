@@ -5,26 +5,29 @@ creator. TLS, private-file validation and fixed port reuse the v1 factory.
 """
 from http import HTTPStatus
 import re
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlencode
 
 from .gateway_readonly import ReadOnlyHandler, TRUSTED_HTTP_HOSTS, create_server as v1_server
 from .read_v2 import CoreReadV2, ReadError
 
-REPOSITORY = re.compile(r'/gateway/v2/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})(?:/(worktrees|github|actions))?\Z')
+REPOSITORY = re.compile(r'/gateway/v2/repositories/([A-Za-z0-9_][A-Za-z0-9_.-]{0,119})(?:/(worktrees|github|actions|pull-preview|pull-results/[0-9a-f-]{36}))?\Z')
 PATHS = {None: 'get_repository_v2', 'worktrees': 'list_worktrees_v2',
-         'github': 'get_github_status_v2', 'actions': 'get_available_actions_v2'}
+         'github': 'get_github_status_v2', 'actions': 'get_available_actions_v2',
+         'pull-preview': 'preview_windows_pull_v2'}
 
 
 def route(raw):
     """No normalization: ambiguous or encoded identities are never resolved."""
     if (type(raw) is not str or len(raw.encode()) > 4096 or
             any(ord(c) < 33 or ord(c) > 126 for c in raw) or
-            any(c in raw for c in ('%', '#', '\\'))):
+            any(c in raw for c in ('#', '\\'))):
         raise ReadError('SCHEMA_INVALID')
     path, _, query = raw.partition('?')
+    if '%' in path:
+        raise ReadError('SCHEMA_INVALID')
     pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, max_num_fields=5)
     values = dict(pairs)
-    if len(values) != len(pairs):
+    if len(values) != len(pairs) or query and urlencode(pairs) != query:
         raise ReadError('SCHEMA_INVALID')
     if path in ('/gateway/v2/repositories', '/gateway/v2/capabilities'):
         operation = ('list_repositories_v2' if path.endswith('repositories') else
@@ -37,8 +40,9 @@ def route(raw):
         if not found:
             raise ReadError('REPOSITORY_NOT_ALLOWED')
         target, suffix = found.groups()
-        operation, scope = PATHS[suffix], None
-    params = {}
+        operation = ('get_windows_pull_result_v2' if suffix and suffix.startswith('pull-results/') else PATHS[suffix])
+        scope = None
+    params, dispatch = {}, {}
     if operation in ('list_repositories_v2', 'list_worktrees_v2', 'get_github_status_v2'):
         if not {'offset', 'limit'} <= set(values) <= {'offset', 'limit', 'revision'}:
             raise ReadError('SCHEMA_INVALID')
@@ -47,9 +51,17 @@ def route(raw):
                 raise ReadError('SCHEMA_INVALID')
         params = {'offset': int(values['offset']), 'limit': int(values['limit']),
                   'inventoryRevision': values.get('revision')}
+    elif operation == 'preview_windows_pull_v2':
+        if set(values) != {'principal', 'request_id', 'gateway_generation'}:
+            raise ReadError('SCHEMA_INVALID')
+        dispatch = values
+    elif operation == 'get_windows_pull_result_v2':
+        if set(values) != {'principal'}:
+            raise ReadError('SCHEMA_INVALID')
+        dispatch, params = values, {'requestId': suffix.split('/')[1]}
     elif values:
         raise ReadError('SCHEMA_INVALID')
-    return operation, target, params, scope
+    return operation, target, params, scope, dispatch
 
 
 class ReadV2Handler(ReadOnlyHandler):
@@ -75,8 +87,8 @@ class ReadV2Handler(ReadOnlyHandler):
             self.send_json(HTTPStatus.FORBIDDEN, {'error': 'GATEWAY_REQUEST_DENIED'})
             return
         try:
-            operation, target, params, scope = route(self.path)
-            result = self.server.read_v2.call(operation, target, params, inventory_scope=scope)
+            operation, target, params, scope, dispatch = route(self.path)
+            result = self.server.read_v2.call(operation, target, params, inventory_scope=scope, **dispatch)
         except (ValueError, TypeError, UnicodeError):
             self.send_json(HTTPStatus.BAD_REQUEST, {'error': 'GATEWAY_ROUTE_DENIED'})
             return
@@ -85,8 +97,8 @@ class ReadV2Handler(ReadOnlyHandler):
         self.send_json(HTTPStatus.OK, result)
 
 
-def create_server(core, *, bind, cert, key, secret_file, allowed_repos, inventories):
-    reads = CoreReadV2(core, allowed_repos=allowed_repos, inventories=inventories)
+def create_server(core, *, bind, cert, key, secret_file, allowed_repos, inventories, machine_generation=None):
+    reads = CoreReadV2(core, allowed_repos=allowed_repos, inventories=inventories, machine_generation=machine_generation)
     server = v1_server(core, bind=bind, cert=cert, key=key, secret_file=secret_file,
                        allowed_repos=allowed_repos)
     server.read_v2 = reads

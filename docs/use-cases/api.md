@@ -22,8 +22,8 @@ routes доступны и какие результаты имеют свежи
 P1 source использует [Windows owner-managed gh reader](../WINDOWS-GITHUB-READ.md)
 для browser main/PR/CI и свежего Pull preflight; actual Windows acceptance
 проверяется отдельно. P0/P2 source приняты owner merge; P3a добавляет шесть
-source-only READ v2, P3b principal-bound preview/lookup и P4 effects остаются
-открытыми задачами. Установка/активация v2 требуют отдельных gates. Нативная GitHub публикация Repo — только typed Gateway
+source-only READ v2, P3b добавляет durable principal-bound preview/lookup.
+Signed atomic reservation и P4 effects остаются открытыми задачами. Установка/активация v2 требуют отдельных gates. Нативная GitHub публикация Repo — только typed Gateway
 по [UC-CONT-003](https://github.com/AlexPastukhh/fortis-container/blob/main/docs/use-cases/delivery.md#uc-cont-003).
 При неизвестном backend или scope — UNKNOWN/STOP, не credential fallback.
 
