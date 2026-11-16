@@ -73,7 +73,8 @@ class AtomicReservationTests(unittest.TestCase):
     def test_atomic_reservation_binds_same_receipt_without_git(self):
         with patch.object(self.machine.worker, 'run') as run, \
              patch.object(self.machine.worker.guard, 'acquire') as guard, \
-             patch.object(self.core, 'preview_observation') as observe:
+             patch.object(self.core, 'preview_observation',
+                          wraps=self.core.preview_observation) as observe:
             saved, calls = self.reserve()
             self.assertEqual(saved, {'requestId': EFFECT, 'reservation': 'RESERVED',
                                      'dispatchReady': False})
@@ -84,7 +85,7 @@ class AtomicReservationTests(unittest.TestCase):
             self.assertEqual(read['effect'], 'UNKNOWN')
             run.assert_not_called()
             guard.assert_not_called()
-            observe.assert_not_called()
+            observe.assert_called_once_with(REPO)
         with self.machine.worker._db() as db:
             binding = db.execute('SELECT actor,repo_id,identity FROM machine_bindings WHERE request_id=?',
                                  (EFFECT,)).fetchone()
@@ -184,6 +185,57 @@ class AtomicReservationTests(unittest.TestCase):
                 self.machine.reserve_signed_candidate(
                     dispatch=self.dispatch, actor=ACTOR, repo=REPO, request_id=EFFECT,
                     gateway_generation=GEN, owner_pins=self.pins)
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_changed_fresh_source_semantics_denied_before_reservation(self):
+        # BoundBackend normalizes its stored fixture on each read; mutate the
+        # actual fresh response, not the cached fixture before normalization.
+        original = self.core.backend.inventory
+        cases = [
+            ('windows-head', lambda b: b['windows'].update(head='f' * 40)),
+            ('windows-clean', lambda b: b['windows'].update(clean=False)),
+            ('windows-branch', lambda b: b['windows'].update(branch='task/unmerged')),
+            ('windows-origin', lambda b: b['windows'].update(origin='wrong-origin')),
+            ('windows-relation', lambda b: b['windows'].update(relation='diverged')),
+            ('docker-head', lambda b: b['docker']['primary'].update(head='f' * 40)),
+            ('docker-clean', lambda b: b['docker']['primary'].update(clean=False)),
+            ('docker-origin', lambda b: b['docker']['primary'].update(origin='wrong-origin')),
+            ('github-repo', lambda b: b['github'].update(githubRepository='other')),
+            ('github-head', lambda b: b['github'].update(head='f' * 40)),
+        ]
+        for name, mutate in cases:
+            def changed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                mutate(result['repositories'][0])
+                return result
+            with self.subTest(name=name), \
+                 patch.object(self.core.backend, 'inventory', side_effect=changed), \
+                 self.assertRaisesRegex(ReadError, 'PREVIEW_STALE'):
+                self.reserve()
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_observation_timestamp_drift_is_not_fingerprint_change(self):
+        original = self.core.backend.inventory
+        def changed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            result['repositories'][0]['windows']['checkedAt'] = '2026-11-17T01:00:30+00:00'
+            result['checkedAt'] = '2026-11-17T01:00:30+00:00'
+            return result
+        with patch.object(self.core.backend, 'inventory', side_effect=changed), \
+             patch.object(self.core, 'preview_observation',
+                          wraps=self.core.preview_observation) as source:
+            reserved, signature_count = self.reserve()
+            self.assertEqual(reserved['reservation'], 'RESERVED')
+            self.assertEqual(signature_count, 1)
+            source.assert_called_once_with(REPO)
+        self.assertEqual(self.counts(), (1, 1))
+
+    def test_fresh_source_exception_does_not_reserve(self):
+        from mirror_api.operations import ObservationError
+        with patch.object(self.core, 'preview_observation',
+                          side_effect=ObservationError('fixture unavailable')):
+            with self.assertRaisesRegex(ReadError, 'SOURCE_UNAVAILABLE'):
+                self.reserve()
         self.assertEqual(self.counts(), (0, 0))
 
     def test_parallel_same_uuid_is_one_reservation_and_one_lookup(self):
