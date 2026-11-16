@@ -15,9 +15,9 @@ import subprocess
 import threading
 import time
 import uuid
-from .operations import ObservationError, SHA, checked_at, git, github_main, windows_status, docker_inventory
+from .operations import ObservationError, SHA, checked_at, git, github_main, windows_status, docker_inventory, relation_to_sha
 from .git_errors import fetch_failure
-from .commands import command, OutputLimit, ChildrenUnconfirmed, remaining
+from .commands import command, OutputLimit, ChildrenUnconfirmed, remaining, budget
 from .process_guard import WriterGuard
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
@@ -174,9 +174,14 @@ class PullWorker:
                     result.setdefault('diagnostic', {'cause': 'FETCH_REASON_NOT_RECORDED', 'exitCode': None})
             elif state == 'UNCERTAIN' and finished and not before_merge and safe and observation['head'] == original['targetSha']:
                 result.update(state='EXECUTED', head=observation['head'], evidence='TARGET_READBACK')
+            elif state == 'UNCERTAIN' and finished and not before_merge and safe:
+                history = self._legacy_history_readback(original, receipt, observation)
+                if history is not None:
+                    result.update(state='EXECUTED', head=history['head'], observation=history,
+                                  evidence='TARGET_INCLUDED_READBACK', targetIncluded=True)
             if result['state'] != state:
                 result['previousState'] = state
-                result['checkedAt'] = observation['checkedAt']
+                result['checkedAt'] = result['observation']['checkedAt']
                 with self._db() as db:
                     changed = db.execute('UPDATE pull_receipts SET state=?,result=? WHERE request_id=? AND state=? AND result IS ?',
                         (result['state'], json.dumps(result, sort_keys=True), request_id, state, saved)).rowcount
@@ -185,6 +190,32 @@ class PullWorker:
             return result
         finally:
             lock.release()
+
+    def _legacy_history_readback(self, original, receipt, observed):
+        """Only legacy post-merge readback failure; never infer unknown effects."""
+        if (receipt.get('error') != 'WINDOWS_READBACK_UNCONFIRMED' or
+                receipt.get('state') != 'UNCERTAIN' or
+                receipt.get('requestId') != original.get('requestId') or self.guard.poisoned or
+                any(receipt.get(key) is not None for key in
+                    ('phase','mergeStarted','workerFinished','knownFailure'))):
+            return None
+        root = self.mirror.windows_root / original['repoId']
+        try:
+            with budget(20):
+                self.payload(original)
+                if relation_to_sha(root, original['expectedHead'], original['targetSha']) not in ('equal','behind'):
+                    return None
+                if relation_to_sha(root, original['targetSha'], observed['head']) != 'behind':
+                    return None
+                after = windows_status(self.mirror.windows_root, original['repoId'], original['origin'])
+                if (after.get('error') or after.get('head') != observed['head'] or
+                        after.get('branch') != 'main' or after.get('clean') is not True or
+                        after.get('originValid') is not True):
+                    return None
+                return {**{key:after.get(key) for key in
+                    ('head','branch','clean','originValid','error')}, 'checkedAt':checked_at()}
+        except (ObservationError, OSError, ValueError, TypeError):
+            return None
 
     def _pending(self, repo_id):
         selected = []

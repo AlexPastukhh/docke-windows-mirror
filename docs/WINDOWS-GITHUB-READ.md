@@ -128,3 +128,32 @@ The fixed GITHUB_MAIN_CHANGED refusal occurs before Windows fetch and merge in a
 This rule applies only to UNCERTAIN. Conflicting progress (FETCH/MERGE/READBACK, merge started, unfinished worker, false knownFailure or invalid flag types) does not gain the legacy exception. DISPATCHED remains reserved; unknown or post-merge outcomes retain existing conservative rules. No new fetch/merge, receipt deletion, owner-session access or machine permission is introduced.
 
 Owner acceptance after reviewed source update/restart: an old GITHUB_MAIN_CHANGED with obsolete expected/target SHAs should resolve through ordinary selected check, without another Git effect. Preview still validates fresh facts; ff-only ancestry remains mandatory. An unresolved receipt takes priority in the workflow summary, disables the manual Preview assessment, and shows the pending count instead of a contradictory available Preview. Linux fixtures are not Windows runtime acceptance.
+
+
+## Legacy readback after later Windows updates — source follow-up
+
+A legacy UNCERTAIN/WINDOWS_READBACK_UNCONFIRMED receipt with all four progress
+fields absent/null can describe an old successful ff-only followed by failed
+observation. In all nine retained pull.py revisions from 4f3ce5898021 through
+dcd9980f7a90 this fixed error is reachable only after merge returned success.
+Later legitimate updates may leave HEAD beyond the old target; equality-only
+recovery then blocks forever even though that target is already in history.
+
+Recovery reads local Windows Git objects only: expectedHead must equal or be
+an ancestor of targetSha, and targetSha must be a strict ancestor of the
+observed HEAD. A second clean main/origin/HEAD readback must match the first.
+The probe shares the request budget and has its own 20-second bound. Missing
+objects, unknown ancestry, unsafe identity, readback races, contradictory
+progress, DISPATCHED or other errors remain unresolved. No fetch is attempted.
+
+The terminal receipt records EXECUTED with TARGET_INCLUDED_READBACK and
+ targetIncluded=true; head/observation.head are the actual later HEAD, while
+ targetSha remains the original requested commit. The original error, timing,
+payload and prior state are retained. This proves convergence of the old goal,
+not exclusive attribution of later commits to the old UUID. Replays are lookup
+only. The browser distinguishes history inclusion from exact-target readback.
+Session receipt privacy and the named machine READ v1 scope do not change.
+
+This is source recovery support, not permission to edit/delete the journal,
+repeat Pull, install code or restart a working Mirror process. Source delivery,
+owner Windows update/restart and live acceptance remain separate stages.
