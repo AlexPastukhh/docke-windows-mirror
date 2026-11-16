@@ -60,6 +60,7 @@ class BrowserPullUnitTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.mirror = FakeMirror()
         self.mirror.windows_root = Path(self.tmp.name) / 'Repos'
+        self.mirror.windows_root.mkdir(exist_ok=True)
         self.ticks = [100.0]
         self.pull = BrowserPull(self.mirror, Path(self.tmp.name) / 'receipts.sqlite', clock=lambda: self.ticks[0])
 
@@ -154,7 +155,7 @@ class BrowserPullUnitTests(unittest.TestCase):
              mock.patch('mirror_api.pull.windows_status',return_value=current) as win, \
              mock.patch('mirror_api.pull.github_main',return_value={'head':NEW,'error':None}) as gh, \
              mock.patch('mirror_api.pull.git',return_value=NEW) as git_read, \
-             mock.patch('mirror_api.pull.subprocess.run',return_value=types.SimpleNamespace(returncode=0)) as git_run, \
+             mock.patch('mirror_api.pull.command',return_value=types.SimpleNamespace(returncode=0)) as git_run, \
              mock.patch.object(self.pull.worker, '_confirmed_readback') as readback:
             receipt = self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
         self.assertEqual('EXECUTED',receipt['state'])
@@ -215,7 +216,7 @@ class BrowserPullUnitTests(unittest.TestCase):
         with mock.patch('mirror_api.pull.docker_inventory',return_value={'sample':docker}), \
              mock.patch('mirror_api.pull.windows_status',return_value=current), \
              mock.patch('mirror_api.pull.github_main',return_value={'head':OLD,'error':None}) as gh, \
-             mock.patch('mirror_api.pull.subprocess.run') as git_run:
+             mock.patch('mirror_api.pull.command') as git_run:
             result=self.pull.execute('sample','one',preview['previewId'],'PULL_WINDOWS_MAIN')
         self.assertEqual('FAILED',result['state'])
         self.assertEqual('GITHUB_MAIN_CHANGED',result['error'])
@@ -275,8 +276,9 @@ class BrowserPullHttpTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.mirror = FakeMirror()
-        self.server = MirrorServer(('127.0.0.1', 0), self.mirror)
-        self.server.browser_pull = BrowserPull(self.mirror, Path(tmp.name) / 'runtime.sqlite')
+        self.mirror.windows_root = Path(tmp.name) / 'Repos'
+        self.mirror.windows_root.mkdir()
+        self.server = MirrorServer(('127.0.0.1', 0), self.mirror, receipt_db=Path(tmp.name) / 'runtime.sqlite')
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.server.server_close)

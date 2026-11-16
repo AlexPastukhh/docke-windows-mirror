@@ -170,9 +170,10 @@ compromised Windows owner process or malicious owner-managed Git filters.
 One writer coordinator serializes browser fetch/check/Pull and machine effects
 per clone; one process-instance guard prevents an independent second writer.
 Persist request identity before Git. SQLite receipt reservation alone is not
-proof that a process is quiescent. Existing in-process locks plus the current
-DISPATCHED/UNCERTAIN guards require further process/crash review in P2.
-The browser recovery fix does not implement that independent process guard.
+proof that a process is quiescent. The P2 source candidate adds a shared Core, canonical-root writer exclusion,
+persistent ledger identity binding and controlled child lifetime; see
+[Mirror Core P2](MIRROR_CORE_P2.md). Windows qualification and owner-controlled
+cutover remain separate gates. This does not enable machine v2 operations.
 
 Recheck owner-registered paths/origin, clean Windows main, expected HEAD, current
 GitHub main and Docker main. Then bounded exact main fetch; FETCH_HEAD must equal

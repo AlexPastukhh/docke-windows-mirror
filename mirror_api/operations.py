@@ -32,6 +32,10 @@ def set_preview_source(task):
 
 
 
+from .commands import command, OutputLimit
+from .process_guard import reparse
+
+
 class ObservationError(ValueError):
     """A source could not be trusted or accessed."""
 
@@ -49,8 +53,10 @@ def run(argv, timeout=25):
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
                GCM_INTERACTIVE="never")
     try:
-        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p = command(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, env=env, check=False)
+    except OutputLimit:
+        raise ObservationError("RESPONSE_TOO_LARGE") from None
     except (OSError, subprocess.TimeoutExpired):
         raise ObservationError("COMMAND_UNAVAILABLE") from None
     if p.returncode:
@@ -91,7 +97,8 @@ def windows_status(base, repo_id, expected_origin):
     if path.is_symlink() or not path.exists():
         result["error"] = "WINDOWS_CLONE_NOT_FOUND"
         return result
-    if not path.is_dir() or not (path / ".git").is_dir() or (path / ".git").is_symlink():
+    if (not path.is_dir() or reparse(path) or not (path / ".git").is_dir() or
+            reparse(path / ".git") or path.resolve().parent != base.resolve()):
         result["error"] = "WINDOWS_CLONE_UNSAFE"
         return result
     try:
@@ -350,7 +357,7 @@ def fetch_windows_main_history(windows_root, repo_id, expected_origin, expected_
     env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never')
     env.pop('GIT_OPTIONAL_LOCKS', None)
     try:
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+        result = command(argv, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45,
             env=env, check=False)
     except subprocess.TimeoutExpired:

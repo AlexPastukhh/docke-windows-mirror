@@ -1,4 +1,4 @@
-# Mirror API-first — source candidate (2026-11-07)
+# Mirror API-first — source and acceptance boundaries
 
 This document owns the new service/frontend source usage and its current limits. The accepted target workflow remains [WORKFLOW](WORKFLOW.md); common authorization and release rules are in the container use-case registry (UC-CONT-002/005/007/009/010/012/016/019). This is **not** live Windows/Gateway acceptance.
 
@@ -9,6 +9,7 @@ This document owns the new service/frontend source usage and its current limits.
 - `mirror_api.static` is the browser frontend. It shows primary/worktrees, Windows, branch SHA, dirty files, action blockers, targeted GitHub checks, progress/cancellation. Read-only main/PR/Actions/Checks observations now come from Windows owner-managed `gh api`, via `mirror_api.windows_github` and the transport-independent `mirror_api.github_snapshot` collector. [Windows GitHub reader](WINDOWS-GITHUB-READ.md) owns credential setup, bounds and owner acceptance. The retained `tools/Export-Mirror-GitHub-Read.py` is a typed Gateway diagnostic helper, never a browser fallback. PRs match the exact task branch; closed PRs get a separate typed `get_pull_request` to distinguish **merged** from merely **closed** (or remain `CLOSED_OR_MERGED_UNVERIFIED` if unavailable). Workflow runs require the **PR head SHA**, matching branch and `pull_request` event; the latest attempt per workflow is selected, not the last successful run. `requiredCI` remains `NOT_VERIFIED`: read-only workflow runs do not prove
   the GitHub UI's required checks/reviews; the owner verifies those before manual Merge. Unknown scope, missing permissions, errors and pagination truncation remain explicit rather than implying no PR/green CI.
 - Browser Stage/Commit/Push write routes and their owner allowlist remain **disabled**. The old WinForms helper remains for local source compatibility, but its network `ls-remote`/fetch/push are blocked (`GATEWAY_ONLY_GITHUB_OPERATION`). GitHub publishing and PRs use the existing native typed Gateway client. Owner-local Windows check and Pull are separate from GitHub publication; both may perform constrained Windows `git fetch origin main` under the owner's Git credentials, but **only Pull** can run `merge --ff-only`.
+- `mirror_api.core` owns the shared domain worker/store, preview facts, history checks and writer lifecycle. Transport adapters retain their authentication/session boundaries. [Mirror Core P2](MIRROR_CORE_P2.md) owns process/child guards and rollout gates.
 - `mirror_api.pull`: shared Windows `main`-only fast-forward worker with exact SHA, clean Docker `main` == verified GitHub `main`, matching trusted Docker/Windows origin, repeated Windows/GitHub preflight, fixed `git fetch` and pinned `merge --ff-only`, readback and durable SQLite receipt. `mirror_api.browser_pull` authorizes a one-shot owner-local browser invocation; an additional authenticated HTTPS Gateway listener is separately configurable and disabled by default. A request with the same UUID is never executed twice after dispatch. No reset, stash, branch switch, deploy or restart.
 - **Owner-local Pull latency:** the server Preview returns `timingsMs.previewTotal` plus available Docker/Windows/GitHub/ancestry observations. Execute rechecks only the selected registered Docker primary (`docker_inventory(repo)`, never the whole workspace) and fetches fresh exact Windows-gh **main-only** SHA (`github_main(..., details=False)`; no PR/CI fanout). All original clean/branch/origin/SHA guards, Windows Git `fetch`, `merge-base --is-ancestor`, pinned `merge --ff-only` and readback remain mandatory. The durable SQLite receipt stores bounded integer `timingsMs` for Docker, preflight, GitHub main, Windows fetch/FETCH_HEAD, post-fetch status, ancestry, merge, final readback and Execute total; even an ambiguous result keeps completed-stage timings without a Git retry. A confirmed receipt is shown immediately: the following **read-only** table refresh happens asynchronously, so a slow GitHub read cannot hold the Pull action open. The UI displays server and browser elapsed times separately (these overlap and must not be summed). Durations from source/fixtures are not evidence of live Windows speed; owner acceptance needs an actual Windows Pull after updating installed source.
 - **Gateway READ v1 принят в source:** `fortis_approvals/integrations/mirror/`
@@ -16,8 +17,9 @@ This document owns the new service/frontend source usage and its current limits.
   Live catalog от 2026-11-15 подтверждает v1 READ/ALLOW для `fortis-approvals`,
   но не Windows installed source/TLS/upstream readback. Старый untracked
   `pull_main` candidate не является действующим ASK provider.
-  Optional `GatewayHandler.do_POST` в Mirror принимает Bearer/UUID без
-  независимого ASK-proof; его нельзя активировать как готовый AI Pull.
+  В кандидате P2 replacement `GatewayHandler` — READ-only: старый POST и
+  unbound lookup квитанций запрещены. Bearer не является ASK-proof.
+  [Mirror Core P2](MIRROR_CORE_P2.md) владеет реализацией, блокировками и приёмкой.
   [Принятый P0 контракт](MIRROR_API_CONTRACT_V1.md) сохраняет старую v1 schema,
   выбирает отдельный v2 и model B; реализация и activation остаются gated. Новые права/deployment
   требуют обычных UC-GW-003/005 и owner acceptance; backlog хранит gates.
@@ -26,7 +28,7 @@ This document owns the new service/frontend source usage and its current limits.
 
 The browser now preserves the **old WinForms presentation hierarchy**:
 
-**Independent repository operations and bulk selection (source candidate):** The primary table has per-row checkboxes separate from its one active details row; "Отметить видимые", "Снять отметки" and "Проверить отмеченные" operate on a bounded set of repository IDs, including selections retained across table filters. Targeted, marked and all-repository Windows checks share one client-side queue of at most **four** concurrent requests (deep PR/CI details at most one). A selected queued row is promoted instead of launching a duplicate request. Other repositories remain selectable, checkable and eligible for independent owner Pull while an unrelated check or Pull is running. Per-repo pending Pull receipts persist independently in the same browser tab; the previous single-receipt session key is migrated without replay. Server-side browser Check and Pull Execute are mutually exclusive **per clone**, and a Check also locks the shared PullWorker per-clone mutex, fencing the optional separate Gateway listener's Pull; independent clones can operate concurrently. Cancellation aborts browser check requests and skips queued checks, **not** an already-started server fetch or Git effect; the same-clone server lock remains until that operation is finished. All exact SHA, origin, clean-state, session/CSRF, one-use Preview and no-blind-retry protections remain. A read-only local refresh cannot overwrite newer completed row checks due to a late response. Windows owner acceptance is separate from source tests; source merge alone does not install the Windows runtime.
+**Independent repository operations and bulk selection (source candidate):** The primary table has per-row checkboxes separate from its one active details row; "Отметить видимые", "Снять отметки" and "Проверить отмеченные" operate on a bounded set of repository IDs, including selections retained across table filters. Targeted, marked and all-repository Windows checks share one client-side queue of at most **four** concurrent requests (deep PR/CI details at most one). A selected queued row is promoted instead of launching a duplicate request. Other repositories remain selectable, checkable and eligible for independent owner Pull while an unrelated check or Pull is running. Per-repo pending Pull receipts persist independently in the same browser tab; the previous single-receipt session key is migrated without replay. Server-side browser Check and Pull Execute are mutually exclusive **per clone**, and Core coordinates Check and Pull with the same per-clone mutex at all effect entrypoints; independent clones can operate concurrently inside one controller. The replacement Gateway adapter cannot execute v1 Pull. Cancellation aborts browser check requests and skips queued checks, **not** an already-started server fetch or Git effect; the same-clone server lock remains until that operation is finished. All exact SHA, origin, clean-state, session/CSRF, one-use Preview and no-blind-retry protections remain. A read-only local refresh cannot overwrite newer completed row checks due to a late response. Windows owner acceptance is separate from source tests; source merge alone does not install the Windows runtime.
 
 1. The main screen is a dense **13-column, one-row-per-Docker-primary** table:
    primary branch, GitHub comparison, Docker changes/SHA, Windows primary branch,
@@ -272,7 +274,7 @@ restrictions stay in place. Porcelain status leading whitespace is preserved.
 This fix is source-tested using a standalone CRLF fixture, but must still be
 accepted on Windows, without overwriting live data.
 
-## Gateway listener (not deployed)
+## Optional replacement Gateway listener — source only
 
 Optional listener requires a private Windows TLS key/cert, a 32+-character random service secret stored outside repositories with owner-only ACL, a protected durable receipt DB under `%LOCALAPPDATA%`, an explicit repo allowlist, and a Windows certificate chain trusted by the **Gateway container** for `host.docker.internal`. Use `--gateway-listen --gateway-bind <reviewed-interface> --gateway-port 443 --gateway-cert <cert.pem> --gateway-key <key.pem> --gateway-secret-file <owner-protected-path> --gateway-receipt-db <owner-protected-path> --gateway-repo <repoId>`. No listener is exposed by default. Do not bind `0.0.0.0` or open firewall access without an explicit owner/network review. TLS/credential installation is an owner task, not an AI task. The one service token authorizes Gateway↔Windows requests; it is **not** a GitHub provider token. Private Git fetch requires Windows Git's existing authorized credential, or a separately reviewed brokered Git transport; credentials are never copied from Gateway into Mirror.
 
@@ -281,20 +283,21 @@ The shared Gateway Extension `JSONAPI` supports fixed HTTPS on port 443 with sys
 ## GitHub Actions source checks
 
 `.github/workflows/mirror-source-ci.yml` provides source-only Python offline
-regression and Node syntax checks. It does not install Windows or enable the
-Gateway Pull listener. Publishing changes beneath `.github/workflows` uses
+regression and Node syntax checks. `mirror-core-windows-ci.yml` adds controlled
+Windows Core/child-lifetime fixtures without network or service deployment.
+Neither workflow installs Mirror on the owner host or enables machine Pull. Publishing changes beneath `.github/workflows` uses
 `github.push_commits` through native Gateway **ASK** and requires owner WebAuthn;
 local tests and an open PR do not by themselves satisfy branch-required checks.
 The test suite runs independently of the private Fortis Gateway repo; the actual
-runtime reader still fails closed if the typed client is unavailable.
+browser GitHub reader still fails closed if Windows gh/auth is unavailable.
 
 <a id="checks--outstanding-acceptance"></a>
 
 ## Source checks and acceptance boundary
 
-Run `python3 -B -m unittest -q test_mirror_pr_ci test_mirror_api test_mirror_worktrees test_mirror_docker_actions test_mirror_workflow_source test_mirror_git_history test_mirror_status_source`
-from the Mirror task worktree. Include `test_mirror_browser_pull` and `test_mirror_table_ui` in the offline
-suite. Tests cover owner preview/session/CSRF/replay and the Node button flow,
+Run `python3 -B -m unittest discover -q -p 'test_mirror*.py'` from the Mirror
+task worktree. This includes the browser, shared Core, process/child guards and
+Node UI fixture; the Windows-only crash test is a separate platform gate. Tests cover owner preview/session/CSRF/replay and the Node button flow,
 but cannot prove Windows Git credentials, NTFS or live Gateway ASK. All other
 browser Git writes remain disabled; pending acceptance is maintained only
 in [BACKLOG-IMPROVEMENTS](BACKLOG-IMPROVEMENTS.md). The reusable owner check
