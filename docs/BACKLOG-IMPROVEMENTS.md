@@ -28,6 +28,8 @@
 
 P4 source/security review на свежих `main` обоих проектов: [P4_SOURCE_SECURITY_REVIEW_2026-11-17](unified-api/P4_SOURCE_SECURITY_REVIEW_2026-11-17.md). Он фиксирует проверенные code gaps и порядок реализации, **не** означает P4 implementation, WRITE activation или live acceptance.
 
+P4 private lookup source candidate: `mirror_api/machine_reads.py:persisted_preview_for_ask` читает по `previewId` только неизменяемую actor/repo/generation/TTL-bound запись в общей ledger, без новой HTTP route, Git, signer или WRITE. Это лишь внутренний строительный блок: доверенный Gateway ASK actor context, свежая проверка предусловий и атомарный binding/reservation остаются незавершёнными.
+
 ### Где остановились
 
 P0–P3 приняты **по исходникам**. В каталоге 8 READ implemented=true,
