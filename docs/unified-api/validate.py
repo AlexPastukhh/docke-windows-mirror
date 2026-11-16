@@ -1,4 +1,4 @@
-"""Offline P0 schema checks. No transport, credential access or Git effects.
+"""Offline versioned source schema checks. No transport, credential access or Git effects.
 
 Install the adjacent requirements in a disposable environment, then run this
 file. Shape examples do NOT validate signatures, policy, TLS or worker safety.
@@ -15,6 +15,7 @@ def main():
     schema = json.loads((root / 'schemas.json').read_text())
     contract = json.loads((root / 'contract.json').read_text())
     examples = json.loads((root / 'examples.json').read_text())
+    examples += json.loads((root / 'read-v2-fixtures.json').read_text())
     Draft202012Validator.check_schema(schema)
     definitions = schema['$defs']
 
@@ -41,7 +42,10 @@ def main():
     assert len(operations) == len({o['operation'] for o in operations}) == 10
     assert len({(o['method'], o['path']) for o in operations}) == 10
     for operation in operations:
-        assert operation['implemented'] is False
+        assert type(operation['implemented']) is bool
+        if operation['implemented']:
+            assert operation['kind'] == 'read'
+            assert operation['logicalOperation'] not in ('preview_windows_pull', 'get_windows_pull_result')
         assert operation['defaultPolicy'] == 'DENY'
         assert operation['version'] == '2'
         assert operation['path'].startswith('/gateway/v2/')
@@ -62,7 +66,7 @@ def main():
         validator = Draft202012Validator(check, format_checker=FormatChecker())
         actual = validator.is_valid(example['value'])
         assert actual == example['valid'], example['name']
-    print(f'P0_SCHEMA_VALID: {len(operations)} operations, {len(examples)} examples')
+    print(f'SOURCE_SCHEMA_VALID: {len(operations)} operations, {len(examples)} examples')
     print('TLS/ASK/signatures/Git effects/runtime: NOT_TESTED')
 
 

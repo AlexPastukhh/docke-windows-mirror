@@ -218,8 +218,9 @@ Owner cutover preserves source/config/CA identity and durable receipts, ensures
 writers are quiescent and activates exactly one writer. Owner controls stop/
 start/rollback; no working process changes in these source PRs.
 
-P0 review/owner merge precedes P1 Windows reader and P2 shared Core. P3 releases
-new v2 READ beside v1, then P4 separately admits signed ASK after security and
+P0 review/owner merge precedes P1 Windows reader and P2 shared Core. P3a implements six observation READs beside v1; [READ-V2](READ-V2.md)
+records their source/activation boundary. P3b supplies durable principal-bound
+preview/lookup; neither may expose legacy Browser receipts. P4 separately admits signed ASK after security and
 live READ gates. P5 changes launchers/cutover only after owner evidence. Each
 source, Windows installation and Gateway image release is separately recorded.
 Compatible upstream source changes do not require a provider/image SHA repin;

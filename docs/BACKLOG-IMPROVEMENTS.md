@@ -5,7 +5,7 @@
 ## Unified Mirror API — P0 review (2026-11-15)
 
 [P0 contract/schemas](MIRROR_API_CONTRACT_V1.md) принят owner merge PR #23;
-UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализация v2.
+UC-GW-012/UC-CONT-003 приняты PR #100/#25. Текущее source-состояние v2 — в каталоге ниже; активация отдельно.
 [Source/catalog review](unified-api/P0_SOURCE_REVIEW_2026-11-15.md) отделяет
 проверенные исходники от неподтверждённой установленной runtime.
 
@@ -15,12 +15,14 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
   fixed GET/identity/pipe limits и regression fixtures. Подтвердить реальные
   Git/GCM/gh scopes, browser main/PR/CI и независимость от Gateway на Windows
   по [Windows GitHub reader](WINDOWS-GITHUB-READ.md), без остановки Gateway.
-- P2 source candidate: [единый Core/worker/store](MIRROR_CORE_P2.md), root/process
+- P2 source принят PR #27/#28/#29: [единый Core/worker/store](MIRROR_CORE_P2.md), root/process
   guard, привязка ledger и контролируемые дочерние процессы. Сохранены per-clone
-  mutex и запрет replay. Linux fixtures проверены; Windows CI и owner-host
-  qualification/cutover остаются отдельными gates. Runtime не изменялся.
-- P3: typed v2 READ при сохранённом strict v1; отдельные source CI,
-  Windows install, Gateway release и fresh live READ с отрицательными probes.
+  mutex и запрет replay. Linux и Windows CI проверены; владелец после обновления сообщил, что Browser работает.
+  Это базовая owner-reported проверка, не полный негативный/rollback протокол.
+- P3a source candidate: шесть ограниченных typed v2 READ при сохранённом strict v1.
+  [Контракт и активация READ](READ-V2.md); default DENY, без изменения launcher.
+  P3b: durable principal-bound preview/lookup перед P4. Windows install, Gateway
+  release и fresh live READ с отрицательными probes ещё не выполнены.
 - P4: signed ASK dispatch, deny legacy POST, principal-bound lookup и один
   exact-SHA ff-only; no-approval/READ credential/replay/timeout/concurrency tests.
 - P5: owner cutover/rollback с сохранённой DB; старый listener/launcher не
@@ -49,7 +51,7 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Это не реализаци
   кнопка результата Pull удалена. Сохранены session ownership и запрет replay.
 - Checkpoints до fetch/merge/readback, безопасная категория fetch failure,
   read-only разрешение известного pre-merge отказа в FAILED. DISPATCHED и
-  оставшийся UNCERTAIN блокируют новый UUID; P2 process guard ещё не принят.
+  оставшийся UNCERTAIN блокируют новый UUID; полная Windows qualification P2 остаётся отдельной.
 - После restart — внутренняя repo-scoped сверка без доступа новой сессии к
   старой квитанции. Неизвестный исход блокирует Preview/metadata fetch.
 - PR #25/#26 приняты. После обновления Windows clone владелец 2026-11-16

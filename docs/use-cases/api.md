@@ -28,3 +28,7 @@ P1 source использует [Windows owner-managed gh reader](../WINDOWS-GITH
 
 **Готово:** source readiness и установленный Windows runtime проверены раздельно;
 конкретная операция подтверждена либо её acceptance остаётся MANUAL-PENDING.
+
+Unified READ v2 source/activation, named inventory scopes, pagination and remaining
+principal-bound preview/lookup gates: [READ-V2](../READ-V2.md). Follow UC-GW-012
+for transport/onboarding; source merge alone does not enable an operation.
