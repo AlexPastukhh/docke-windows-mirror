@@ -134,6 +134,54 @@ class MachineReads:
                         data['previewId'], now + self.TTL, origin, raw))
         return data
 
+    def persisted_preview_for_ask(self, repo, actor, preview_id, gateway_generation):
+        """Private P4 prerequisite: read the immutable READ snapshot by previewId.
+
+        Caller authentication and ASK approval are NOT established by this
+        lookup. A future trusted Gateway adapter must prove the actor and
+        independently revalidate fresh Git preconditions before signing.
+        No HTTP route, TTL renewal, worker reservation or Git observation.
+        """
+        require(type(repo) is str and REPO.fullmatch(repo), 'REPOSITORY_NOT_ALLOWED')
+        principal(actor); identifier(preview_id)
+        require(type(gateway_generation) is str and GENERATION.fullmatch(gateway_generation))
+        with self.worker._db() as db:
+            row = db.execute(
+                'SELECT request_id,actor,repo_id,gateway_generation,config_generation,'
+                'expires_at,origin,data FROM machine_previews WHERE preview_id=?',
+                (preview_id,)).fetchone()
+        # Unknown, Browser and foreign snapshots are indistinguishable.
+        require(row is not None and row[1] == actor and row[2] == repo,
+                'PERMISSION_DENIED')
+        require(row[3] == gateway_generation and
+                row[4] == self._generation(gateway_generation), 'PREVIEW_STALE')
+        require(int(self.clock()) < row[5], 'PREVIEW_EXPIRED')
+        snapshot = json.loads(row[7])
+        require(type(snapshot) is dict and snapshot.get('repoId') == repo and
+                snapshot.get('previewId') == preview_id and
+                snapshot.get('configGeneration') == row[4] and
+                snapshot.get('expiresAt') == timestamp(row[5]) and
+                snapshot.get('blockers') == [] and
+                snapshot.get('originIdentity') == 'AlexPastukhh/' + repo and
+                type(row[6]) is str and 0 < len(row[6]) <= 512 and
+                all(type(snapshot.get(k)) is str and SHA.fullmatch(snapshot[k])
+                    for k in ('expectedHead', 'targetSha', 'dockerHead')) and
+                snapshot['expectedHead'] != snapshot['targetSha'] and
+                snapshot['dockerHead'] == snapshot['targetSha'] and
+                type(snapshot.get('sourceEvidence')) is dict and
+                set(snapshot['sourceEvidence']) == {'windows', 'docker', 'github'} and
+                all(type(item) is dict and item.get('verification') == 'VERIFIED'
+                    and item.get('branch') == 'main'
+                    for item in snapshot['sourceEvidence'].values()) and
+                snapshot['sourceEvidence']['windows'].get('head') == snapshot['expectedHead'] and
+                snapshot['sourceEvidence']['github'].get('head') == snapshot['targetSha'] and
+                snapshot['sourceEvidence']['docker'].get('head') == snapshot['targetSha'] and
+                snapshot['sourceEvidence']['windows'].get('clean') is True and
+                snapshot['sourceEvidence']['docker'].get('clean') is True,
+                'REQUEST_ID_CONFLICT')
+        # Private origin is deliberately NOT part of the public READ envelope.
+        return {'readRequestId': row[0], 'origin': row[6], 'snapshot': snapshot}
+
     def lookup(self, repo, actor, request_id):
         principal(actor); identifier(request_id)
         with self.worker._db() as db:

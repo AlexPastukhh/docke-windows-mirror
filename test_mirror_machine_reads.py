@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from mirror_api.core import MirrorCore
 from mirror_api.gateway_v2 import ReadV2Handler
 from mirror_api.machine_reads import MachineReads
-from mirror_api.read_v2 import CoreReadV2
+from mirror_api.read_v2 import CoreReadV2, ReadError
 from test_mirror_read_v2 import Backend, AT
 
 OLD, NEW = 'b' * 40, 'a' * 40
@@ -97,6 +97,58 @@ class MachineReadTests(unittest.TestCase):
         with self.machine.worker._db() as db:
             self.assertEqual(1, db.execute('SELECT COUNT(*) FROM machine_previews').fetchone()[0])
         self.assertEqual(first, self.preview()['data'])
+
+    def test_private_preview_id_lookup_is_frozen_and_uses_no_writer_or_git(self):
+        first = self.preview()['data']
+        self.assertEqual([], first['blockers'])
+        with patch.object(self.core, 'preview_observation') as observe, \
+             patch.object(self.machine.worker, 'run') as run, \
+             patch.object(self.machine.worker, 'status') as status, \
+             patch.object(self.machine.worker.guard, 'acquire') as writer:
+            saved = self.machine.persisted_preview_for_ask(
+                'fortis-approvals', 'repo:fixture', first['previewId'], 'd' * 64)
+            self.assertEqual({'readRequestId': CREATE, 'origin': ORIGIN, 'snapshot': first}, saved)
+            self.backend.value['docker']['primary']['head'] = 'f' * 40
+            self.assertEqual(saved, self.machine.persisted_preview_for_ask(
+                'fortis-approvals', 'repo:fixture', first['previewId'], 'd' * 64))
+            observe.assert_not_called(); run.assert_not_called()
+            status.assert_not_called(); writer.assert_not_called()
+
+    def test_private_preview_id_lookup_denies_foreign_and_unknown_id(self):
+        first = self.preview()['data']
+        for actor, repo, ident in [
+            ('another', 'fortis-approvals', first['previewId']),
+            ('repo:fixture', 'other-repo', first['previewId']),
+            ('repo:fixture', 'fortis-approvals', EFFECT)]:
+            with self.subTest(actor=actor, repo=repo):
+                with self.assertRaisesRegex(ReadError, '^PERMISSION_DENIED$'):
+                    self.machine.persisted_preview_for_ask(repo, actor, ident, 'd' * 64)
+        self.assertEqual('PERMISSION_DENIED', self.lookup(request_id=CREATE)['error']['code'])
+
+    def test_private_preview_id_lookup_generation_expiry_and_restart(self):
+        first = self.preview()['data']
+        with self.assertRaisesRegex(ReadError, '^PREVIEW_STALE$'):
+            self.machine.persisted_preview_for_ask(
+                'fortis-approvals', 'repo:fixture', first['previewId'], 'e' * 64)
+        reopened = MachineReads(self.core, self.api.machine_generation, clock=lambda: self.ticks[0])
+        self.assertEqual(first, reopened.persisted_preview_for_ask(
+            'fortis-approvals', 'repo:fixture', first['previewId'], 'd' * 64)['snapshot'])
+        self.ticks[0] += 120
+        with self.assertRaisesRegex(ReadError, '^PREVIEW_EXPIRED$'):
+            reopened.persisted_preview_for_ask(
+                'fortis-approvals', 'repo:fixture', first['previewId'], 'd' * 64)
+        # Historic UUID READ is still frozen, not renewed for ASK.
+        self.assertEqual(first, self.preview()['data'])
+
+    def test_private_preview_id_lookup_rejects_durable_identity_mismatch(self):
+        first = self.preview()['data']
+        with self.machine.worker._db() as db:
+            data = dict(first, targetSha='f' * 40)
+            db.execute('UPDATE machine_previews SET data=? WHERE preview_id=?',
+                       (json.dumps(data), first['previewId']))
+        with self.assertRaisesRegex(ReadError, '^REQUEST_ID_CONFLICT$'):
+            self.machine.persisted_preview_for_ask(
+                'fortis-approvals', 'repo:fixture', first['previewId'], 'd' * 64)
 
     def test_capacity_fails_closed_and_does_not_renew_existing_ids(self):
         first = self.preview()['data']
