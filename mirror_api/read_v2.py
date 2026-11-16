@@ -1,19 +1,24 @@
 """Bounded machine READ projections over the same MirrorCore as the owner UI.
 
-No worker, receipt lookup, writer claim, fetch or preview allocation is used.
-The P0 catalog remains the design baseline; source readiness is separate.
+Base observations do not initialize a worker. Principal-bound metadata and
+lookup reuse the existing Core ledger; no READ claims a writer, reconciles an
+outcome, fetches or merges. Source readiness remains separate from activation.
 """
 import hashlib
 import json
 import re
+import sqlite3
 
 from .commands import budget
 from .operations import ObservationError, REPO, SHA, checked_at
 
-READS = ('list_repositories_v2', 'get_repository_v2', 'list_worktrees_v2',
+BASE_READS = ('list_repositories_v2', 'get_repository_v2', 'list_worktrees_v2',
          'get_github_status_v2', 'get_available_actions_v2', 'get_capabilities_v2')
-DEFERRED = ('check_windows_history_v2', 'preview_windows_pull_v2',
-            'execute_windows_pull_v2', 'get_windows_pull_result_v2')
+BOUND_READS = ('preview_windows_pull_v2', 'get_windows_pull_result_v2')
+READS = BASE_READS + BOUND_READS
+DEFERRED = ('check_windows_history_v2', 'execute_windows_pull_v2')
+ALL_OPERATIONS = BASE_READS + ('check_windows_history_v2', 'preview_windows_pull_v2',
+                               'execute_windows_pull_v2', 'get_windows_pull_result_v2')
 BRANCH = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./-]{0,159}\Z')
 DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 UTC = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|\+00:00)\Z')
@@ -85,16 +90,17 @@ def source(raw, *, kind, timestamp):
             'branch': branch, 'clean': clean, 'errorCode': code}
 
 
-def actions():
+def actions(*, bound=False):
     # Capability describes this source surface, never the actor's Gateway grant
     # or whether a particular clone could pass a future signed Pull preflight.
-    return [{'operation': op, 'available': op in READS,
-             'blockers': [] if op in READS else ['POLICY_DENIED']}
-            for op in READS + DEFERRED]
+    enabled = READS if bound else BASE_READS
+    return [{'operation': op, 'available': op in enabled,
+             'blockers': [] if op in enabled else ['POLICY_DENIED']}
+            for op in ALL_OPERATIONS]
 
 
 class CoreReadV2:
-    def __init__(self, core, *, allowed_repos, inventories):
+    def __init__(self, core, *, allowed_repos, inventories, machine_generation=None):
         require(type(allowed_repos) in (list, tuple, frozenset) and
                 1 <= len(allowed_repos) <= 128 and len(set(allowed_repos)) == len(allowed_repos))
         require(all(type(x) is str and REPO.fullmatch(x) for x in allowed_repos))
@@ -107,7 +113,22 @@ class CoreReadV2:
                     all(type(x) is str and x in self.allowed_repos for x in members) and
                     len(set(members)) == len(members))
             self.inventories[name] = tuple(sorted(members))
-        self.core = core
+        require(machine_generation is None or type(machine_generation) is str and DIGEST.fullmatch(machine_generation))
+        effective = None if machine_generation is None else digest({
+            'deployment': machine_generation, 'repositories': sorted(self.allowed_repos),
+            'inventories': self.inventories, 'contract': 'mirror-principal-reads-v2.1'})
+        self.core, self.machine_generation, self._machine = core, effective, None
+
+    def _actions(self):
+        return actions(bound=self.machine_generation is not None and self.core.configured)
+
+    def _bound_reads(self):
+        require(self.machine_generation is not None and self.core.configured and not self.core.closed, 'POLICY_DENIED')
+        with self.core.lock:
+            if self._machine is None:
+                from .machine_reads import MachineReads
+                self._machine = MachineReads(self.core, self.machine_generation)
+            return self._machine
 
     def _row(self, repo, *, details=False):
         require(not self.core.closed, 'SOURCE_UNAVAILABLE')
@@ -133,7 +154,7 @@ class CoreReadV2:
                   'docker': source(row['docker'].get('primary'), kind='docker', timestamp=observed),
                   'windows': source(row.get('windows'), kind='windows', timestamp=observed),
                   'github': source(row.get('github'), kind='github', timestamp=observed),
-                  'relation': 'unknown', 'actions': actions()}
+                  'relation': 'unknown', 'actions': self._actions()}
         # remote=False intentionally means no fresh GitHub comparison. In
         # particular, absent SHA on both sides is never equality evidence.
         return result
@@ -226,7 +247,8 @@ class CoreReadV2:
                 'requiredCI': 'NOT_VERIFIED', 'truncated': limited or end < maximum,
                 'nextOffset': end if end < maximum else None, 'inventoryRevision': revision}
 
-    def call(self, operation, target, params, *, inventory_scope=None):
+    def call(self, operation, target, params, *, inventory_scope=None, principal=None,
+             request_id=None, gateway_generation=None):
         require(operation in READS + DEFERRED, 'POLICY_DENIED')
         require(type(target) is str and REPO.fullmatch(target), 'REPOSITORY_NOT_ALLOWED')
         result = {'schemaVersion': 2, 'operation': operation, 'target': target,
@@ -240,6 +262,8 @@ class CoreReadV2:
                 require(target in self.allowed_repos, 'REPOSITORY_NOT_ALLOWED')
             if operation in ('list_repositories_v2', 'list_worktrees_v2', 'get_github_status_v2'):
                 page_params(params, 100 if operation == 'get_github_status_v2' else 128)
+            elif operation == 'get_windows_pull_result_v2':
+                require(type(params) is dict and set(params) == {'requestId'})
             else:
                 require(type(params) is dict and not params)
             with budget():
@@ -253,15 +277,24 @@ class CoreReadV2:
                     data = self._github(target, params)
                 elif operation == 'get_available_actions_v2':
                     self._row(target)  # A configured but missing clone is not a healthy target.
-                    data = actions()
+                    data = self._actions()
                 elif operation == 'get_capabilities_v2':
-                    data = [dict(item, version='2') for item in actions()]
+                    data = [dict(item, version='2') for item in self._actions()]
+                elif operation == 'preview_windows_pull_v2':
+                    from .machine_reads import principal as check_principal, identifier, GENERATION
+                    check_principal(principal); identifier(request_id)
+                    require(type(gateway_generation) is str and GENERATION.fullmatch(gateway_generation))
+                    data = self._bound_reads().preview(target, principal, request_id, gateway_generation)
+                elif operation == 'get_windows_pull_result_v2':
+                    from .machine_reads import principal as check_principal, identifier
+                    check_principal(principal); identifier(params['requestId'])
+                    data = self._bound_reads().lookup(target, principal, params['requestId'])
                 else:
                     raise ReadError('POLICY_DENIED')
             require(len(json.dumps(data, allow_nan=False).encode()) <= 250000, 'LIMIT_EXCEEDED')
             result['data'] = data
         except ReadError as exc:
             result['error'] = {'code': str(exc), 'retryable': False}
-        except (ObservationError, OSError, ValueError, TypeError, KeyError):
+        except (ObservationError, OSError, ValueError, TypeError, KeyError, sqlite3.Error, OverflowError):
             result['error'] = {'code': 'SOURCE_UNAVAILABLE', 'retryable': False}
         return result

@@ -21,9 +21,10 @@ UC-GW-012/UC-CONT-003 приняты PR #100/#25. Текущее source-сост
   Это базовая owner-reported проверка, не полный негативный/rollback протокол.
 - P3a source candidate: шесть ограниченных typed v2 READ при сохранённом strict v1.
   [Контракт и активация READ](READ-V2.md); default DENY, без изменения launcher.
-  P3b: durable principal-bound preview/lookup перед P4. Windows install, Gateway
+  P3b source candidate: durable principal-bound preview/lookup в общей ledger;
+  нет production writer для machine bindings до signed atomic reservation P4. Windows install, Gateway
   release и fresh live READ с отрицательными probes ещё не выполнены.
-- P4: signed ASK dispatch, deny legacy POST, principal-bound lookup и один
+- P4: signed ASK dispatch, atomic binding/reservation, deny legacy POST и один
   exact-SHA ff-only; no-approval/READ credential/replay/timeout/concurrency tests.
 - P5: owner cutover/rollback с сохранённой DB; старый listener/launcher не
   удалять до живой приёмки. P6 обновляет docs/evidence на каждом этапе.
