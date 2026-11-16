@@ -36,6 +36,7 @@ class Element {
   append(child) { this.children.push(child); }
   replaceChildren(...next) { this.children = [...next]; }
   setAttribute(key, value) { this.attributes[key] = value; }
+  focus() { focusedDetail = this; }
 }
 const elements = Object.fromEntries(IDs.map(key => [key, new Element()]));
 // DOM fixture must contain the 13 actual header cells from index.html.
@@ -73,7 +74,7 @@ const fixture = (name, head, task, opts = {}) => ({
 });
 const mirror = fixture('docke-windows-mirror', sha('a'), 'my-task', {checked: false});
 const approvals = fixture('fortis-approvals', sha('c'), 'gw-task', {checked: false});
-let clipboard = null;
+let clipboard = null, selectedDetail = null, focusedDetail = null;
 let pulled = false, uncertainMode = false, uncertainReads = 0, failRemoteOnce = false;
 let denyGatewayRead = false, receiptOverride = null, safetyBlocked = false;
 let deferRefresh = false, releaseRefresh = null;
@@ -156,10 +157,13 @@ const fetch = async (url, options = {}) => {
   throw Error('unexpected fetch ' + url);
 };
 const sandbox = vm.createContext({
-  document: {getElementById: key => elements[key], createElement: tag => new Element(tag)},
+  document: {getElementById: key => elements[key], createElement: tag => new Element(tag),
+    createRange: () => ({block:null, selectNodeContents(block) {this.block=block;}})},
   navigator: {clipboard: {writeText: async value => { clipboard = value; }}},
   fetch, console, AbortController, Map, Promise, localStorage, sessionStorage,
-  window: {confirm: () => { throw Error('Unexpected second confirmation modal'); },
+  window: {getSelection: () => ({removeAllRanges() {selectedDetail=null;},
+      addRange(range) {selectedDetail=range.block;}}),
+    confirm: () => { throw Error('Unexpected second confirmation modal'); },
     addEventListener: (event, callback) => winEvents.set(event, callback),
     removeEventListener: event => winEvents.delete(event)}
 });
@@ -239,8 +243,29 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
   assert.match(elements['row-full'].textContent, /Windows · Ветка для просмотра: main/);
   assert.match(elements['row-full'].textContent, /GitHub main SHA: НЕ ПРОВЕРЕН/);
   assert.ok(!elements['row-full'].textContent.includes('task/my-task'), 'Worktrees do not clutter primary details');
+  assert.equal(elements['copy-details'].disabled, false, 'Selected row must enable the actual copy button');
   await elements['copy-details'].onclick();
   assert.equal(clipboard, elements['row-full'].textContent, 'Copy entire primary detail block');
+  const originalClipboard = sandbox.navigator.clipboard;
+  const beforeCopyRequests = requests.length;
+  delete sandbox.navigator.clipboard;
+  await elements['copy-details'].onclick();
+  assert.equal(selectedDetail, elements['row-full'], 'No Clipboard API: select the entire block');
+  assert.equal(focusedDetail, elements['row-full']);
+  assert.match(elements.banner.textContent, /Ctrl\+C/);
+  sandbox.navigator.clipboard = {writeText: async () => {throw Error('Clipboard permission denied');}};
+  selectedDetail = null;
+  await elements['copy-details'].onclick();
+  assert.equal(selectedDetail, elements['row-full'], 'Denied Clipboard API: same manual fallback');
+  assert.equal(requests.length, beforeCopyRequests, 'Copy must not submit API/Git requests');
+  let rejectCopy;
+  sandbox.navigator.clipboard = {writeText: () => new Promise((resolve, reject) => {rejectCopy=reject;})};
+  const delayedCopy = elements['copy-details'].onclick();
+  elements['tab-worktrees'].onclick(); selectedDetail = null;
+  rejectCopy(Error('Clipboard denied after navigation')); await delayedCopy;
+  assert.equal(selectedDetail, null, 'A delayed failure must not select a hidden/different detail block');
+  elements['tab-row'].onclick();
+  sandbox.navigator.clipboard = originalClipboard;
   elements['tab-worktrees'].onclick();
   assert.equal(elements['panel-row'].hidden, true);
   assert.equal(elements['panel-worktrees'].hidden, false);
@@ -254,7 +279,12 @@ vm.runInContext(source, sandbox, {filename: 'app.js'});
     'Owner can opt in to complete worktree PR/CI inspection');
   assert.match(elements['worktree-check-status'].textContent, /Подробные PR\/CI проверены/);
   await elements['copy-details'].onclick();
+  assert.equal(elements['copy-details'].disabled, false);
   assert.equal(clipboard, elements['worktree-full'].textContent, 'Copy entire selected worktree detail block');
+  delete sandbox.navigator.clipboard;
+  await elements['copy-details'].onclick();
+  assert.equal(selectedDetail, elements['worktree-full'], 'Fallback selects the active Worktrees block');
+  sandbox.navigator.clipboard = originalClipboard;
   list[1].onclick();
   assert.match(elements['row-full'].textContent, /fortis-approvals/);
   assert.match(elements['worktree-full'].textContent, /gw-task/);
