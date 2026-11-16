@@ -1,8 +1,8 @@
 {
   "contract": "MIRROR_API_CONTRACT_V1",
-  "status": "PROPOSED",
+  "status": "SOURCE_CANDIDATE",
   "wireVersion": 2,
-  "trustModel": "B_PROPOSED",
+  "trustModel": "B_SELECTED_EFFECTS_DEFERRED",
   "runtimeActivation": false,
   "schemaFile": "schemas.json",
   "operations": [
@@ -16,7 +16,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/pageParams"
       },
@@ -34,7 +34,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/emptyParams"
       },
@@ -52,7 +52,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/pageParams"
       },
@@ -70,7 +70,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/pageParams"
       },
@@ -88,7 +88,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/emptyParams"
       },
@@ -178,7 +178,7 @@
       "kind": "read",
       "intendedPolicy": "ALLOW",
       "defaultPolicy": "DENY",
-      "implemented": false,
+      "implemented": true,
       "params": {
         "$ref": "#/$defs/emptyParams"
       },

@@ -1,7 +1,9 @@
-# Mirror Core P2 — source candidate
+# Mirror Core P2 — accepted source
 
-This describes the P2 implementation candidate, not an installed Windows
-runtime or an enabled machine v2 provider. The logical contract remains
+P2 source was accepted in PR #27, with the clipboard/readback follow-ups in
+#28/#29. After updating Windows, the owner reported that Browser works. This
+is basic owner-reported acceptance, not the full negative/crash/rollback
+qualification and not an enabled machine v2 provider. The logical contract remains
 [MIRROR_API_CONTRACT_V1](MIRROR_API_CONTRACT_V1.md); the delivery sequence and
 remaining gates remain in [the backlog](BACKLOG-IMPROVEMENTS.md).
 
