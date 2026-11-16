@@ -182,6 +182,113 @@ class MachineReads:
         # Private origin is deliberately NOT part of the public READ envelope.
         return {'readRequestId': row[0], 'origin': row[6], 'snapshot': snapshot}
 
+    def reserve_signed_candidate(self, *, dispatch, actor, repo, request_id,
+                                 gateway_generation, owner_pins):
+        """P4 source-only candidate: one atomic binding + receipt reservation.
+
+        NOT a public operation or an execution handoff. Caller MUST authenticate
+        actor and WRITE bearer independently and check fresh Git/policy before
+        making this call. Reserved rows deliberately block all future writers;
+        only a separately reviewed, single-use worker handoff may execute them.
+        A matching old UUID is lookup-only, including after proof/preview TTL.
+        """
+        from .proof_v2 import OUTER, verify_new_dispatch
+
+        principal(actor); identifier(request_id)
+        require(type(repo) is str and REPO.fullmatch(repo), 'REPOSITORY_NOT_ALLOWED')
+        require(type(gateway_generation) is str and GENERATION.fullmatch(gateway_generation))
+        require(type(dispatch) is dict and set(dispatch) == OUTER, 'SCHEMA_INVALID')
+        require(dispatch['requestId'] == request_id and dispatch['repoId'] == repo and
+                dispatch['actor'] == actor, 'PERMISSION_DENIED')
+        require(type(dispatch['proof']) is dict and
+                set(dispatch['proof']) == {'schemaVersion', 'keyId', 'claims', 'signature'},
+                'PROOF_REQUIRED')
+        require(type(dispatch['previewId']) is str and UUID4.fullmatch(dispatch['previewId']) and
+                all(type(dispatch[k]) is str and SHA.fullmatch(dispatch[k])
+                    for k in ('expectedHead', 'targetSha')) and
+                type(dispatch['configGeneration']) is str and
+                GENERATION.fullmatch(dispatch['configGeneration']), 'SCHEMA_INVALID')
+        identity_keys = ('previewId', 'expectedHead', 'targetSha', 'configGeneration')
+        identity = {k: dispatch[k] for k in identity_keys}
+        frozen_identity = json.dumps(identity, sort_keys=True, separators=(',', ':'))
+
+        def existing(db):
+            # Status-only replay; no approval/signature/expiry refresh. Compare
+            # both durable identities, refuse all Browser or foreign UUIDs.
+            bound = db.execute('SELECT actor,repo_id,identity FROM machine_bindings '
+                               'WHERE request_id=?', (request_id,)).fetchone()
+            receipt = db.execute('SELECT payload FROM pull_receipts WHERE request_id=?',
+                                 (request_id,)).fetchone()
+            if bound is None and receipt is None:
+                return None
+            require(bound is not None and receipt is not None, 'PERMISSION_DENIED')
+            require(bound[0] == actor and bound[1] == repo, 'PERMISSION_DENIED')
+            saved_preview = db.execute(
+                'SELECT origin FROM machine_previews WHERE preview_id=? AND actor=? AND repo_id=?',
+                (identity['previewId'], actor, repo)).fetchone()
+            require(saved_preview is not None, 'PERMISSION_DENIED')
+            expected = dict(requestId=request_id, repoId=repo,
+                            expectedHead=identity['expectedHead'],
+                            targetSha=identity['targetSha'], origin=saved_preview[0])
+            frozen_payload = json.dumps(expected, sort_keys=True, separators=(',', ':'))
+            require(bound[2] == frozen_identity and receipt[0] == frozen_payload,
+                    'REQUEST_ID_CONFLICT')
+            return {'requestId': request_id, 'reservation': 'EXISTING',
+                    'dispatchReady': False}
+
+        # Existing machine UUID must not be proof-reverified/redispatched after
+        # TTL. This check is inside the same transaction as initial admission.
+        with self.worker._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            prior = existing(db)
+            if prior is not None:
+                return prior
+
+        # No broad SQLite transaction spans cryptographic verification.
+        # The row is rechecked for exact equality *inside* the write transaction.
+        stored = self.persisted_preview_for_ask(repo, actor, identity['previewId'],
+                                                gateway_generation)
+        verified = verify_new_dispatch(
+            dispatch, authenticated_actor=actor, route_repo=repo,
+            route_request_id=request_id, persisted_preview=stored,
+            owner_pins=owner_pins, now=int(self.clock()))
+        expected = dict(requestId=request_id, repoId=repo,
+                        expectedHead=verified.expected_head,
+                        targetSha=verified.target_sha, origin=verified.origin)
+        frozen_payload = json.dumps(expected, sort_keys=True, separators=(',', ':'))
+        with self.worker._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            # Fail closed if a concurrent writer reserved this UUID while
+            # signature verification was in progress. Never adopt Browser UUIDs.
+            prior = existing(db)
+            if prior is not None:
+                return prior
+            require(not db.execute('SELECT 1 FROM machine_previews WHERE request_id=?',
+                                   (request_id,)).fetchone(), 'REQUEST_ID_CONFLICT')
+            now = int(self.clock())
+            require(now < verified.expires_at, 'PREVIEW_EXPIRED')
+            row = db.execute('SELECT request_id,actor,repo_id,gateway_generation,'
+                             'config_generation,expires_at,origin,data FROM machine_previews '
+                             'WHERE preview_id=?', (verified.preview_id,)).fetchone()
+            require(row is not None and row[0] == verified.read_request_id and
+                    row[1] == actor and row[2] == repo and
+                    row[3] == gateway_generation and
+                    row[4] == self._generation(gateway_generation) and
+                    row[5] > now and row[6] == verified.origin and
+                    json.loads(row[7]) == stored['snapshot'], 'PREVIEW_STALE')
+            blocker = self.worker._reservation_blocker(db, repo)
+            require(blocker is None, blocker or 'REPOSITORY_OPERATION_PENDING')
+            progress = {'requestId': request_id, 'state': 'DISPATCHED', 'head': None,
+                        'phase': 'RESERVED_MACHINE', 'mergeStarted': False}
+            # These inserts commit or roll back as ONE unit in the worker DB.
+            db.execute('INSERT INTO machine_bindings VALUES(?,?,?,?)',
+                       (request_id, actor, repo, frozen_identity))
+            db.execute('INSERT INTO pull_receipts VALUES(?,?,?,?)',
+                       (request_id, frozen_payload, 'DISPATCHED',
+                        json.dumps(progress, sort_keys=True)))
+        return {'requestId': request_id, 'reservation': 'RESERVED',
+                'dispatchReady': False}
+
     def lookup(self, repo, actor, request_id):
         principal(actor); identifier(request_id)
         with self.worker._db() as db:
