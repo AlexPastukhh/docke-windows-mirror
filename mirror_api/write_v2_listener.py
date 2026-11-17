@@ -26,17 +26,27 @@ class PrivateWriteV2Handler(ReadV2Handler):
     class. No separate listener, port, second Core, or Git executor is built.
     """
     def _transport_allowed(self):
-        # An HTTPS Host header does not prove a TLS socket or a trusted peer.
-        # A future protected factory must provide an independently reviewed
-        # peer gate. The callback must return exact True, not a truthy object.
+        # A Host header, TLS alone, or a TCP source address cannot authenticate
+        # the remote Gateway. The owner-supplied gate receives the actual
+        # CA-verified *client certificate DER* and socket peer address, NEVER
+        # only a caller-controlled header/address. Do not accept a server SSL
+        # context that merely requests (or does not request) a client cert.
         try:
-            if not isinstance(self.connection, ssl.SSLSocket):
+            connection = self.connection
+            if not isinstance(connection, ssl.SSLSocket):
                 return False
-            if self.connection.version() not in ('TLSv1.2', 'TLSv1.3'):
+            if connection.version() not in ('TLSv1.2', 'TLSv1.3'):
+                return False
+            if connection.context.verify_mode != ssl.CERT_REQUIRED:
+                return False
+            peer_der = connection.getpeercert(binary_form=True)
+            if type(peer_der) is not bytes or not peer_der:
                 return False
             gate = getattr(self.server, 'owner_write_peer_gate', None)
-            return callable(gate) and gate(self.client_address) is True
-        except (OSError, ValueError, TypeError, AttributeError):
+            # Owner gate must independently pin the approved cert identity
+            # and the allowed source; only literal True admits an effect.
+            return callable(gate) and gate(peer_der, self.client_address) is True
+        except (OSError, ValueError, TypeError, AttributeError, ssl.SSLError):
             return False
 
     def do_POST(self):

@@ -196,3 +196,200 @@ class HostedWindowsP4CryptoTests(unittest.TestCase):
             self.send()
         git.assert_not_called()
         self.assertEqual(self.counts(), (0, 0))
+
+
+@unittest.skipUnless(importlib.util.find_spec('cryptography'),
+                     'P4 real TLS fixtures require cryptography in hosted Windows CI')
+class HostedWindowsP4MutualTLSTests(unittest.TestCase):
+    """Real ephemeral CA, verified mTLS and exact client DER pin, no live host.
+
+    Positive paths use the existing UNREGISTERED handler on 127.0.0.1 only;
+    the owner-installed HTTPS server factory remains GET-only. Git is mocked.
+    """
+    signed_dispatch = HostedWindowsP4CryptoTests.signed_dispatch
+
+    def setUp(self):
+        import datetime
+        import ipaddress
+        import ssl
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+        from mirror_api.write_v2_listener import PrivateWriteV2Handler
+
+        # Reuse the real Ed25519 signer and in-memory actor-bound preview, not
+        # its mock-signature test fixture or any owner/Windows credentials.
+        HostedWindowsP4CryptoTests.setUp(self)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        utc = datetime.timezone.utc
+        now = datetime.datetime.now(utc)
+
+        def key():
+            return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        ca_key = key()
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,
+                                                  'P4 ephemeral test CA')])
+        ca = (x509.CertificateBuilder().subject_name(ca_name)
+              .issuer_name(ca_name).public_key(ca_key.public_key())
+              .serial_number(x509.random_serial_number())
+              .not_valid_before(now - datetime.timedelta(minutes=2))
+              .not_valid_after(now + datetime.timedelta(hours=1))
+              .add_extension(x509.BasicConstraints(ca=True, path_length=0),
+                             critical=True)
+              .sign(ca_key, hashes.SHA256()))
+        ca_pem = ca.public_bytes(serialization.Encoding.PEM)
+        ca_file = root / 'ca.pem'
+        ca_file.write_bytes(ca_pem)
+
+        def issue(name, *, server):
+            subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+            private = key()
+            builder = (x509.CertificateBuilder().subject_name(subject)
+                       .issuer_name(ca.subject).public_key(private.public_key())
+                       .serial_number(x509.random_serial_number())
+                       .not_valid_before(now - datetime.timedelta(minutes=2))
+                       .not_valid_after(now + datetime.timedelta(minutes=40))
+                       .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                                      critical=True)
+                       .add_extension(x509.ExtendedKeyUsage([
+                           ExtendedKeyUsageOID.SERVER_AUTH if server
+                           else ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False))
+            if server:
+                builder = builder.add_extension(x509.SubjectAlternativeName([
+                    x509.DNSName('host.docker.internal'),
+                    x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),
+                    critical=False)
+            cert = builder.sign(ca_key, hashes.SHA256())
+            crt_path = root / (name + '.crt')
+            key_path = root / (name + '.key')
+            crt_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(private.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            return crt_path, key_path, cert.public_bytes(serialization.Encoding.DER)
+
+        server_crt, server_key, _ = issue('test-server', server=True)
+        client_crt, client_key, client_der = issue('expected-gateway', server=False)
+        other_crt, other_key, _ = issue('other-gateway', server=False)
+
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        server_context.load_cert_chain(str(server_crt), str(server_key))
+        server_context.load_verify_locations(cafile=str(ca_file))
+        server_context.verify_mode = ssl.CERT_REQUIRED
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0),
+                                          PrivateWriteV2Handler)
+        self.server.daemon_threads = True
+        self.server.socket = server_context.wrap_socket(
+            self.server.socket, server_side=True)
+        self.server.owner_write_opt_in = True
+        self.server.private_write_bridge = self.bridge
+        self.server.gateway_secret = READ
+        self.server.allowed_repos = self.reads.allowed_repos
+        self.server.read_v2 = self.reads
+        self.server.mirror = self.core
+        expected = hashlib.sha256(client_der).digest()
+        self.observed_tls = []
+
+        def exact_owner_peer_gate(cert_der, peer):
+            # Stronger than just host address: enforce the *verified client*
+            # DER fingerprint. Cert and peer are passed by the TLS handler,
+            # not from untrusted HTTP headers.
+            self.observed_tls.append((cert_der, peer))
+            return (type(peer) is tuple and len(peer) == 2 and
+                    peer[0] == '127.0.0.1' and
+                    hashlib.sha256(cert_der).digest() == expected)
+
+        self.server.owner_write_peer_gate = exact_owner_peer_gate
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        # LIFO cleanup: shutdown thread -> join -> close socket.
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.server.shutdown)
+
+        def client_context(crt, private):
+            context = ssl.create_default_context(
+                ssl.Purpose.SERVER_AUTH, cafile=str(ca_file))
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            if crt is not None:
+                context.load_cert_chain(str(crt), str(private))
+            return context
+
+        self.good_context = client_context(client_crt, client_key)
+        self.other_context = client_context(other_crt, other_key)
+        self.no_client_context = client_context(None, None)
+        self.untrusted_server_context = ssl.create_default_context(
+            ssl.Purpose.SERVER_AUTH)  # system roots do not contain test CA
+
+    def https(self, *, context=None, bearer=WRITE, body=None):
+        import http.client
+        context = self.good_context if context is None else context
+        raw = (json.dumps(self.dispatch, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=True).encode('ascii')
+               if body is None else body)
+        conn = http.client.HTTPSConnection('127.0.0.1', self.server.server_port,
+                                            timeout=6, context=context)
+        try:
+            conn.putrequest('POST', '/gateway/v2/repositories/' + REPO + '/pull',
+                            skip_host=True, skip_accept_encoding=True)
+            conn.putheader('Host', 'host.docker.internal:443')
+            conn.putheader('Authorization', 'Bearer ' + bearer)
+            conn.putheader('Content-Type', 'application/json')
+            conn.putheader('Content-Length', str(len(raw)))
+            conn.endheaders(raw)
+            response = conn.getresponse()
+            return response.status, json.loads(response.read().decode('ascii'))
+        finally:
+            conn.close()
+
+    def test_real_tls_mutual_auth_pinned_client_cert_and_real_ed25519(self):
+        with patch.object(self.machine.worker, '_execute',
+                          return_value={'requestId': EFFECT, 'state': 'EXECUTED',
+                                        'head': self.dispatch['targetSha']}) as git:
+            status, result = self.https()
+            self.assertEqual(status, 200)
+            self.assertEqual((result['workerState'], result['effect']),
+                             ('EXECUTED', 'CONFIRMED'))
+            replay_status, replay = self.https()
+            self.assertEqual((replay_status, replay['effect']), (200, 'CONFIRMED'))
+            self.assertEqual(git.call_count, 1)
+        self.assertEqual(len(self.observed_tls), 2)
+        self.assertTrue(all(type(item[0]) is bytes and item[0] for item in
+                            self.observed_tls))
+        self.assertEqual(HostedWindowsP4CryptoTests.counts(self), (1, 1))
+
+    def test_real_mtls_unpinned_client_and_read_bearer_never_run_git(self):
+        with patch.object(self.machine.worker, '_execute') as git:
+            status, denied = self.https(context=self.other_context)
+            self.assertEqual((status, denied['error']),
+                             (403, 'GATEWAY_WRITE_TRANSPORT_DENIED'))
+            status, denied = self.https(bearer=READ)
+            self.assertEqual((status, denied['error']),
+                             (403, 'GATEWAY_WRITE_DENIED'))
+            git.assert_not_called()
+        self.assertEqual(HostedWindowsP4CryptoTests.counts(self), (0, 0))
+        self.assertEqual(len(self.observed_tls), 2)
+
+    def test_real_tls_requires_client_cert_trusted_server_and_owner_optin(self):
+        import ssl
+        with patch.object(self.machine.worker, '_execute') as git:
+            with self.assertRaises((ssl.SSLError, ConnectionError, OSError)):
+                self.https(context=self.no_client_context)
+            with self.assertRaises((ssl.SSLError, ConnectionError, OSError)):
+                self.https(context=self.untrusted_server_context)
+            self.server.owner_write_opt_in = False
+            status, denied = self.https()
+            self.assertEqual((status, denied['error']), (405, 'GATEWAY_READ_ONLY'))
+            git.assert_not_called()
+        self.assertEqual(HostedWindowsP4CryptoTests.counts(self), (0, 0))
