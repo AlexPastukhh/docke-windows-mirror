@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from mirror_api.core import MirrorCore
+from mirror_api.pull import PullDenied, PullWorker
+from mirror_api.operations import ObservationError
 from mirror_api.proof_v2 import PinnedEd25519Keys, IDENTITY, _canonical
 from mirror_api.read_v2 import CoreReadV2, ReadError
 from test_mirror_machine_reads import BoundBackend, CREATE, EFFECT, ORIGIN
@@ -126,6 +128,39 @@ class AtomicReservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ReadError, 'PERMISSION_DENIED'):
             self.reserve(self._dispatch(BROWSER), request_id=BROWSER)
         self.assertEqual(self.counts(), (1, 2))
+
+    def test_browser_cannot_adopt_exact_machine_receipt_even_after_execution(self):
+        # Before this gate, a byte-for-byte matching Browser payload could
+        # read a machine receipt via PullWorker.run's existing-UUID shortcut.
+        self.reserve()
+        with self.machine.worker._db() as db:
+            payload = json.loads(db.execute(
+                'SELECT payload FROM pull_receipts WHERE request_id=?',
+                (EFFECT,)).fetchone()[0])
+        with patch.object(self.machine.worker,'_execute') as git, \
+             patch.object(self.machine.worker,'status') as status:
+            with self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+                self.machine.worker.run(payload,repo_id=REPO,allowed_repos={REPO})
+            git.assert_not_called()
+            status.assert_not_called()
+        with self.machine.worker._db() as db:
+            db.execute('UPDATE pull_receipts SET state=? WHERE request_id=?',
+                       ('EXECUTED',EFFECT))
+        with patch.object(self.machine.worker,'status') as status:
+            with self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+                self.machine.worker.run(payload,repo_id=REPO,allowed_repos={REPO})
+            status.assert_not_called()
+
+    def test_browser_cannot_take_machine_read_uuid_without_existing_receipt(self):
+        # READ UUID exists before any machine effect reservation. Browser may
+        # not insert its own receipt under that identity.
+        browser=dict(requestId=CREATE,repoId=REPO,expectedHead='b'*40,
+                     targetSha='a'*40,origin=ORIGIN)
+        with patch.object(self.machine.worker,'_execute') as git, \
+             self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+            self.machine.worker.run(browser,repo_id=REPO,allowed_repos={REPO})
+        git.assert_not_called()
+        self.assertEqual(self.counts(),(0,0))
 
     def test_browser_after_machine_reservation_blocked_before_git(self):
         self.reserve()
@@ -263,6 +298,206 @@ class AtomicReservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ReadError, 'REPOSITORY_OPERATION_PENDING'):
             self.reserve(self._dispatch(SECOND), request_id=SECOND)
         self.assertEqual(self.counts(), (1, 1))
+
+    def dispatch_effect(self):
+        with patch('mirror_api.proof_v2._verify_ed25519') as verify:
+            result = self.machine.dispatch_signed_candidate(
+                dispatch=self.dispatch, actor=ACTOR, repo=REPO,
+                request_id=EFFECT, gateway_generation=GEN, owner_pins=self.pins)
+            return result, verify.call_count
+
+    def test_machine_handoff_reuses_one_worker_and_claims_before_effect(self):
+        seen = []
+        def execute(value, *, timings):
+            self.assertEqual(value['requestId'], EFFECT)
+            with self.machine.worker._db() as db:
+                result = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                               (EFFECT,)).fetchone()[0])
+                seen.append(result['phase'])
+                self.assertEqual('MACHINE_CLAIMED', result['phase'])
+                self.assertFalse(result['mergeStarted'])
+            return {'requestId':EFFECT,'state':'EXECUTED',
+                    'head':self.dispatch['targetSha']}
+        with patch.object(self.machine.worker,'_execute',side_effect=execute) as git, \
+             patch.object(self.machine.worker, 'run') as browser:
+            result, crypto = self.dispatch_effect()
+            self.assertEqual((result['workerState'], result['effect']), ('EXECUTED','CONFIRMED'))
+            self.assertEqual(crypto,1)
+            self.assertEqual(seen,['MACHINE_CLAIMED'])
+            self.assertEqual(git.call_count,1)
+            browser.assert_not_called()
+            self.assertEqual(self.counts(),(1,1))
+            self.ticks[0] += 400
+            result2, crypto2 = self.dispatch_effect()
+            self.assertEqual((result2['workerState'],result2['effect'],crypto2),
+                             ('EXECUTED','CONFIRMED',0))
+            self.assertEqual(git.call_count,1)
+
+    def test_machine_handoff_crash_before_claim_is_never_reattached(self):
+        # Reservation committed, but the process crashed before consuming its
+        # ephemeral permit. Restart must not resurrect the source-only effect.
+        with patch.object(self.machine.worker,'_run_machine_reserved',
+                          side_effect=KeyboardInterrupt), \
+             self.assertRaises(KeyboardInterrupt):
+            self.dispatch_effect()
+        with self.machine.worker._db() as db:
+            phase = json.loads(db.execute('SELECT result FROM pull_receipts').fetchone()[0])['phase']
+            self.assertEqual(phase,'RESERVED_MACHINE')
+        self.assertEqual(self.machine.worker._machine_handoff_permits,{})
+        self.assertEqual(self.machine.lookup(REPO,ACTOR,EFFECT)['effect'],'UNKNOWN')
+        with patch.object(self.machine.worker,'_execute') as effect:
+            existing, verifier = self.dispatch_effect()
+            self.assertEqual((existing['workerState'],existing['effect'],verifier),
+                             ('DISPATCHED','UNKNOWN',0))
+            effect.assert_not_called()
+        # A distinct worker that opens the same durable SQLite ledger has NO
+        # permit, so guessing the old UUID and identity cannot start Git.
+        second = PullWorker(self.core.backend,self.machine.worker.path)
+        self.addCleanup(second.close)
+        identity = {k:self.dispatch[k] for k in
+                    ('previewId','expectedHead','targetSha','configGeneration')}
+        with patch.object(second,'_execute') as effect, \
+             self.assertRaisesRegex(PullDenied,'MACHINE_HANDOFF_NOT_FRESH'):
+            second._run_machine_reserved(request_id=EFFECT,repo_id=REPO,
+                actor=ACTOR,identity=identity,now=self.ticks[0],permit=object())
+        effect.assert_not_called()
+
+    def test_crash_after_durable_claim_never_replays_git(self):
+        with patch.object(self.machine.worker,'_execute',
+                          side_effect=KeyboardInterrupt) as effect, \
+             self.assertRaises(KeyboardInterrupt):
+            self.dispatch_effect()
+        with self.machine.worker._db() as db:
+            row = db.execute('SELECT state,result FROM pull_receipts').fetchone()
+            self.assertEqual(row[0],'DISPATCHED')
+            self.assertEqual(json.loads(row[1])['phase'],'MACHINE_CLAIMED')
+        self.assertEqual(effect.call_count,1)
+        with patch.object(self.machine.worker,'_execute') as repeated:
+            status, signature = self.dispatch_effect()
+            self.assertEqual((status['workerState'],status['effect'],signature),
+                             ('DISPATCHED','UNKNOWN',0))
+            repeated.assert_not_called()
+
+    def test_lost_ack_and_observation_failure_keep_unknown_without_retry(self):
+        with patch.object(self.machine.worker,'_execute',
+                          side_effect=ObservationError('WINDOWS_READBACK_UNCONFIRMED')) as effect, \
+             patch('mirror_api.pull.windows_status',
+                   side_effect=ObservationError('WINDOWS_READ_UNAVAILABLE')):
+            first, verify = self.dispatch_effect()
+        self.assertEqual(verify,1)
+        self.assertEqual(first['effect'],'UNKNOWN')
+        self.assertEqual(effect.call_count,1)
+        with patch.object(self.machine.worker,'_execute') as no_retry:
+            repeated, signature = self.dispatch_effect()
+        self.assertEqual((repeated['effect'],signature),('UNKNOWN',0))
+        no_retry.assert_not_called()
+
+    def test_machine_guard_unavailable_is_known_pre_effect_failure(self):
+        with patch.object(self.machine.worker.guard,'acquire',
+                          side_effect=OSError('MIRROR_WRITER_BUSY')), \
+             patch.object(self.machine.worker,'_execute') as effect:
+            status, crypto = self.dispatch_effect()
+            self.assertEqual(crypto,1)
+            self.assertEqual((status['workerState'],status['effect']),('FAILED','NONE'))
+            self.assertEqual(status['errorCode'],'WRITER_BUSY')
+            effect.assert_not_called()
+        self.assertEqual(self.counts(),(1,1))
+
+    def test_machine_uses_existing_worker_live_preconditions_before_git(self):
+        with patch('mirror_api.pull.docker_inventory',return_value={}) as inventory, \
+             patch('mirror_api.pull.command') as git:
+            status, crypto = self.dispatch_effect()
+        self.assertEqual(crypto,1)
+        self.assertEqual(status['effect'],'UNKNOWN')
+        inventory.assert_called_once_with(REPO)
+        git.assert_not_called()
+        with patch('mirror_api.proof_v2._verify_ed25519') as verifier, \
+             patch.object(self.machine.worker,'_execute') as repeat:
+            status2 = self.machine.dispatch_signed_candidate(
+                dispatch=self.dispatch, actor=ACTOR, repo=REPO, request_id=EFFECT,
+                gateway_generation=GEN, owner_pins=self.pins)
+            self.assertEqual(status2['effect'],'UNKNOWN')
+            verifier.assert_not_called()
+            repeat.assert_not_called()
+
+    def test_permit_expires_at_proof_ttl_even_before_preview_ttl(self):
+        permit = object()
+        with patch('mirror_api.proof_v2._verify_ed25519'):
+            row = self.machine.reserve_signed_candidate(
+                dispatch=self.dispatch,actor=ACTOR,repo=REPO,request_id=EFFECT,
+                gateway_generation=GEN,owner_pins=self.pins,_handoff_permit=permit)
+        self.assertEqual(row['reservation'],'RESERVED')
+        self.ticks[0] += 105  # proof expires at TIME+100; preview at TIME+120
+        identity = {k:self.dispatch[k] for k in
+                    ('previewId','expectedHead','targetSha','configGeneration')}
+        with patch.object(self.machine.worker,'_execute') as git, \
+             self.assertRaisesRegex(PullDenied,'MACHINE_PROOF_EXPIRED'):
+            self.machine.worker._run_machine_reserved(
+                request_id=EFFECT,repo_id=REPO,actor=ACTOR,
+                identity=identity,now=self.ticks[0],permit=permit)
+        git.assert_not_called()
+        with self.assertRaisesRegex(PullDenied,'MACHINE_HANDOFF_NOT_FRESH'):
+            self.machine.worker._run_machine_reserved(
+                request_id=EFFECT,repo_id=REPO,actor=ACTOR,
+                identity=identity,now=self.ticks[0],permit=permit)
+        self.assertEqual(self.counts(),(1,1))
+        self.assertEqual(self.machine.lookup(REPO,ACTOR,EFFECT)['effect'],'UNKNOWN')
+
+    def test_tampered_durable_actor_binding_refuses_one_time_handoff(self):
+        permit = object()
+        with patch('mirror_api.proof_v2._verify_ed25519'):
+            self.machine.reserve_signed_candidate(
+                dispatch=self.dispatch,actor=ACTOR,repo=REPO,request_id=EFFECT,
+                gateway_generation=GEN,owner_pins=self.pins,_handoff_permit=permit)
+        with self.machine.worker._db() as db:
+            db.execute('UPDATE machine_bindings SET actor=? WHERE request_id=?',
+                       ('foreign',EFFECT))
+        identity = {k:self.dispatch[k] for k in
+                    ('previewId','expectedHead','targetSha','configGeneration')}
+        with patch.object(self.machine.worker,'_execute') as git, \
+             self.assertRaisesRegex(PullDenied,'MACHINE_RESERVATION_MISMATCH'):
+            self.machine.worker._run_machine_reserved(
+                request_id=EFFECT,repo_id=REPO,actor=ACTOR,identity=identity,
+                now=self.ticks[0],permit=permit)
+        git.assert_not_called()
+        with self.assertRaisesRegex(PullDenied,'MACHINE_HANDOFF_NOT_FRESH'):
+            self.machine.worker._run_machine_reserved(
+                request_id=EFFECT,repo_id=REPO,actor=ACTOR,identity=identity,
+                now=self.ticks[0],permit=permit)
+        with self.machine.worker._db() as db:
+            self.assertEqual('RESERVED_MACHINE',json.loads(
+                db.execute('SELECT result FROM pull_receipts').fetchone()[0])['phase'])
+
+    def test_browser_refused_during_machine_effect_and_never_executes_git(self):
+        entered = threading.Event()
+        release = threading.Event()
+        attempts = []
+        def execute(value, *, timings):
+            entered.set()
+            if not release.wait(timeout=8):
+                raise AssertionError('fixture timed out')
+            attempts.append(value['requestId'])
+            return {'requestId':EFFECT,'state':'EXECUTED','head':self.dispatch['targetSha']}
+        browser=dict(requestId=BROWSER,repoId=REPO,expectedHead='b'*40,
+                     targetSha='a'*40,origin=ORIGIN)
+        with patch('mirror_api.proof_v2._verify_ed25519'), \
+             patch.object(self.machine.worker,'_execute',side_effect=execute) as effect:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                candidate=pool.submit(self.machine.dispatch_signed_candidate,
+                    dispatch=self.dispatch,actor=ACTOR,repo=REPO,request_id=EFFECT,
+                    gateway_generation=GEN,owner_pins=self.pins)
+                try:
+                    self.assertTrue(entered.wait(timeout=8))
+                    denied=self.machine.worker.run(browser,repo_id=REPO,allowed_repos=[REPO])
+                    self.assertEqual((denied['state'],denied['error']),
+                                     ('FAILED','REPOSITORY_OPERATION_PENDING'))
+                finally:
+                    release.set()
+                result=candidate.result(timeout=12)
+            self.assertEqual((result['workerState'],result['effect']),('EXECUTED','CONFIRMED'))
+            self.assertEqual(attempts,[EFFECT])
+            self.assertEqual(effect.call_count,1)
+        self.assertEqual(self.counts(),(1,2))
 
     def test_read_uuid_cannot_be_reused_as_effect(self):
         with self.assertRaisesRegex(ReadError, 'REQUEST_ID_CONFLICT'):

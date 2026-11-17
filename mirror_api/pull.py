@@ -52,6 +52,9 @@ class PullWorker:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.repo_locks = {}
+        # Nonpersistent, one-use machine permits. Restart never re-arms a
+        # reserved row, including a crash before the first Git child.
+        self._machine_handoff_permits = {}
         self._initialize()
         self.guard.bind_store(self.path, self.store_id)
 
@@ -261,6 +264,24 @@ class PullWorker:
                 return 'REPOSITORY_OPERATION_PENDING'
         return None
 
+    @staticmethod
+    def _machine_uuid_reserved(db, request_id):
+        """A Browser request cannot borrow a machine READ or effect UUID.
+
+        Older Browser-only stores have no machine tables. If present, both
+        machine namespaces are private even when the saved receipt payload
+        happens to be byte-for-byte identical to Browser's payload.
+        """
+        for table in ('machine_previews', 'machine_bindings'):
+            present = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if present and db.execute(
+                    f'SELECT 1 FROM {table} WHERE request_id=?',
+                    (request_id,)).fetchone():
+                return True
+        return False
+
     def run(self, body, *, repo_id, allowed_repos):
         value = self.payload(body)
         if value["repoId"] != repo_id or repo_id not in allowed_repos:
@@ -273,6 +294,11 @@ class PullWorker:
             refusal = None
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
+                # Keep Browser and signed machine UUID namespaces disjoint.
+                # A matching historical machine receipt is never a Browser
+                # status shortcut, and a machine READ UUID cannot be stolen.
+                if self._machine_uuid_reserved(db, value['requestId']):
+                    raise PullDenied('MACHINE_REQUEST_ID_PRIVATE')
                 # Reservation is durable before touching Git. Any repeated request
                 # becomes status-only, including after crash or timeout.
                 row = db.execute("SELECT payload FROM pull_receipts WHERE request_id=?",
@@ -294,60 +320,182 @@ class PullWorker:
                 return self.status(value["requestId"], repo_id=repo_id)
             if refusal is not None:
                 return refusal
-            try:
-                self.guard.acquire()
-            except OSError as exc:
-                # Admission never started a child; preserve an owned terminal
-                # receipt rather than leaving the browser UUID DISPATCHING.
-                code = str(exc) if isinstance(exc, (ValueError, OSError)) else ''
-                if code not in ('MIRROR_WRITER_BUSY','WINDOWS_ROOT_UNAVAILABLE',
-                                'WINDOWS_PREVIOUS_CHILDREN_ACTIVE','WINDOWS_PREVIOUS_JOB_UNCONFIRMED',
-                                'MIRROR_RECEIPT_STORE_MISMATCH','MIRROR_RECEIPT_STORE_UNCONFIRMED'):
-                    code = 'MIRROR_WRITER_UNAVAILABLE'
-                receipt = self._refusal(value, code)
-                with self._db() as db:
-                    db.execute('UPDATE pull_receipts SET state=?,result=? WHERE request_id=?',
-                               ('FAILED', json.dumps(receipt), value['requestId']))
-                return receipt
-            timings = {}
-            started = time.perf_counter()
-            try:
-                with self.guard.scope():
-                    receipt = self._execute(value, timings=timings)
-            except (PullDenied, ObservationError) as exc:
-                # After reservation, any error might have interrupted the effect.
-                # Never retry it automatically. Readback/reconcile may resolve it.
-                receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
-                           "head": None, "error": str(exc), "checkedAt": checked_at()}
-                with self._db() as db:
-                    progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
-                                                     (value['requestId'],)).fetchone()[0])
-                receipt.update(phase=progress['phase'], mergeStarted=progress['mergeStarted'],
-                               workerFinished=True, knownFailure=not isinstance(exc, PullReadbackUnconfirmed))
-                if isinstance(exc, PullFetchFailed):
-                    receipt['diagnostic'] = exc.diagnostic
-                if isinstance(exc, PullReadbackUnconfirmed):
-                    receipt['readbackIssues'] = exc.issues
-            except Exception:
-                with self._db() as db:
-                    progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
-                                                     (value['requestId'],)).fetchone()[0])
-                receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
-                           "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at(),
-                           "phase": progress['phase'], "mergeStarted": progress['mergeStarted'],
-                           "workerFinished": not self.guard.poisoned, "knownFailure": False}
-            if timings:
-                # Only bounded durations, no Git paths/credentials/CLI output.
-                timings['executeTotal'] = round((time.perf_counter() - started) * 1000)
-                receipt['timingsMs'] = timings
-            with self._db() as db:
-                db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=?",
-                           (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
-            # Readback can confirm a pre-merge failure, but never dispatch Git.
-            return self.status(value['requestId'], repo_id=repo_id) if receipt['state'] == 'UNCERTAIN' else receipt
-
+            return self._execute_reserved_effect(value)
         finally:
             repo_lock.release()
+
+    def _arm_machine_handoff(self, request_id, permit, expires_at):
+        # Only the just-created signed reservation can issue this ephemeral
+        # capability. It is never stored in SQLite, receipts or HTTP replies.
+        if type(expires_at) is not int or expires_at <= 0:
+            raise PullDenied('MACHINE_PROOF_EXPIRED')
+        with self.lock:
+            if request_id in self._machine_handoff_permits:
+                raise PullDenied('MACHINE_HANDOFF_ALREADY_ARMED')
+            self._machine_handoff_permits[request_id] = (permit, expires_at)
+
+    def _discard_machine_handoff(self, request_id, permit):
+        # An exception before claim also loses execution authority: the
+        # persisted reservation remains for status-only readback.
+        with self.lock:
+            current = self._machine_handoff_permits.get(request_id)
+            if current is not None and current[0] is permit:
+                del self._machine_handoff_permits[request_id]
+
+    def _consume_machine_handoff(self, request_id, permit):
+        with self.lock:
+            claimed = self._machine_handoff_permits.pop(request_id, None)
+            if claimed is None or claimed[0] is not permit:
+                raise PullDenied('MACHINE_HANDOFF_NOT_FRESH')
+            return claimed[1]
+
+    def _run_machine_reserved(self, *, request_id, repo_id, actor, identity, now, permit):
+        """Private one-time handoff of a newly signed machine reservation.
+
+        Called only by MachineReads.dispatch_signed_candidate after it receives
+        RESERVED from its own proof/fresh-preview check. A persisted old row,
+        a Browser receipt or a second request can never enter the Git worker.
+        The claim is durable BEFORE guard acquisition or any Git child.
+        """
+        from .machine_reads import principal, identifier, GENERATION
+        principal(actor)
+        identifier(request_id)
+        if type(repo_id) is not str or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}', repo_id):
+            raise PullDenied('REPOSITORY_NOT_ALLOWED')
+        if type(now) is not int or now < 0:
+            raise PullDenied('MACHINE_RESERVATION_INVALID')
+        expected_fields = {'previewId', 'expectedHead', 'targetSha', 'configGeneration'}
+        if (type(identity) is not dict or set(identity) != expected_fields or
+                any(type(identity[k]) is not str for k in expected_fields) or
+                not UUID.fullmatch(identity['previewId']) or
+                not SHA.fullmatch(identity['expectedHead']) or
+                not SHA.fullmatch(identity['targetSha']) or
+                not GENERATION.fullmatch(identity['configGeneration'])):
+            raise PullDenied('MACHINE_RESERVATION_INVALID')
+        # Consume before any DB read/claim or child. Errors and lost ACKs
+        # cannot be used to repeat this handoff with the same token.
+        proof_expires_at = self._consume_machine_handoff(request_id, permit)
+        if now >= proof_expires_at:
+            raise PullDenied('MACHINE_PROOF_EXPIRED')
+        lock = self._repo_lock(repo_id)
+        if not lock.acquire(blocking=False):
+            raise PullDenied('REPOSITORY_OPERATION_PENDING')
+        try:
+            with self._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                binding = db.execute(
+                    'SELECT actor,repo_id,identity FROM machine_bindings WHERE request_id=?',
+                    (request_id,)).fetchone()
+                receipt = db.execute(
+                    'SELECT payload,state,result FROM pull_receipts WHERE request_id=?',
+                    (request_id,)).fetchone()
+                if binding is None or receipt is None:
+                    raise PullDenied('MACHINE_RESERVATION_NOT_FOUND')
+                if binding[0] != actor or binding[1] != repo_id:
+                    raise PullDenied('MACHINE_RESERVATION_MISMATCH')
+                frozen = json.dumps(identity, sort_keys=True, separators=(',', ':'))
+                if binding[2] != frozen:
+                    raise PullDenied('MACHINE_RESERVATION_MISMATCH')
+                preview = db.execute(
+                    'SELECT actor,repo_id,config_generation,expires_at,origin,data '
+                    'FROM machine_previews WHERE preview_id=?',
+                    (identity['previewId'],)).fetchone()
+                if (preview is None or preview[0] != actor or preview[1] != repo_id or
+                        preview[2] != identity['configGeneration'] or preview[3] <= now):
+                    raise PullDenied('MACHINE_PREVIEW_STALE')
+                snapshot = json.loads(preview[5])
+                if (type(snapshot) is not dict or
+                        any(snapshot.get(k) != identity[k] for k in expected_fields) or
+                        snapshot.get('blockers') != [] or
+                        type(preview[4]) is not str or not preview[4]):
+                    raise PullDenied('MACHINE_RESERVATION_MISMATCH')
+                value = self.payload(json.loads(receipt[0]))
+                expected = dict(requestId=request_id, repoId=repo_id,
+                                expectedHead=identity['expectedHead'],
+                                targetSha=identity['targetSha'], origin=preview[4])
+                if (receipt[0] != json.dumps(expected, sort_keys=True, separators=(',', ':')) or
+                        receipt[1] != 'DISPATCHED'):
+                    raise PullDenied('MACHINE_RESERVATION_MISMATCH')
+                progress = json.loads(receipt[2]) if receipt[2] else None
+                if (type(progress) is not dict or
+                        set(progress) != {'requestId','state','head','phase','mergeStarted'} or
+                        progress != {'requestId':request_id,'state':'DISPATCHED',
+                                     'head':None,'phase':'RESERVED_MACHINE',
+                                     'mergeStarted':False}):
+                    raise PullDenied('MACHINE_RESERVATION_ALREADY_CLAIMED')
+                # Claim the exact reserved effect with a one-way CAS. Crash at
+                # any point afterward leaves DISPATCHED and forbids replay.
+                claimed = dict(progress, phase='MACHINE_CLAIMED')
+                updated = db.execute(
+                    "UPDATE pull_receipts SET result=? WHERE request_id=? "
+                    "AND state='DISPATCHED' AND result=?",
+                    (json.dumps(claimed, sort_keys=True), request_id, receipt[2]))
+                if updated.rowcount != 1:
+                    raise PullDenied('MACHINE_RESERVATION_ALREADY_CLAIMED')
+            # Existing Browser guard/checkpoint/ff-only/readback path only.
+            return self._execute_reserved_effect(value)
+        finally:
+            lock.release()
+
+    def _execute_reserved_effect(self, value):
+        """Existing one-shot owner of guarded Git + durable checkpoints.
+
+        Both Browser and machine go through this exact implementation. Caller
+        owns the clone's repo lock and has already atomically reserved/claimed
+        this effect. This helper itself NEVER performs admission or replay.
+        """
+        try:
+            self.guard.acquire()
+        except OSError as exc:
+            # Admission never started a child; preserve an owned terminal
+            # receipt rather than leaving the browser UUID DISPATCHING.
+            code = str(exc) if isinstance(exc, (ValueError, OSError)) else ''
+            if code not in ('MIRROR_WRITER_BUSY','WINDOWS_ROOT_UNAVAILABLE',
+                            'WINDOWS_PREVIOUS_CHILDREN_ACTIVE','WINDOWS_PREVIOUS_JOB_UNCONFIRMED',
+                            'MIRROR_RECEIPT_STORE_MISMATCH','MIRROR_RECEIPT_STORE_UNCONFIRMED'):
+                code = 'MIRROR_WRITER_UNAVAILABLE'
+            receipt = self._refusal(value, code)
+            with self._db() as db:
+                db.execute('UPDATE pull_receipts SET state=?,result=? WHERE request_id=?',
+                           ('FAILED', json.dumps(receipt), value['requestId']))
+            return receipt
+        timings = {}
+        started = time.perf_counter()
+        try:
+            with self.guard.scope():
+                receipt = self._execute(value, timings=timings)
+        except (PullDenied, ObservationError) as exc:
+            # After reservation, any error might have interrupted the effect.
+            # Never retry it automatically. Readback/reconcile may resolve it.
+            receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
+                       "head": None, "error": str(exc), "checkedAt": checked_at()}
+            with self._db() as db:
+                progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                                 (value['requestId'],)).fetchone()[0])
+            receipt.update(phase=progress['phase'], mergeStarted=progress['mergeStarted'],
+                           workerFinished=True, knownFailure=not isinstance(exc, PullReadbackUnconfirmed))
+            if isinstance(exc, PullFetchFailed):
+                receipt['diagnostic'] = exc.diagnostic
+            if isinstance(exc, PullReadbackUnconfirmed):
+                receipt['readbackIssues'] = exc.issues
+        except Exception:
+            with self._db() as db:
+                progress = json.loads(db.execute('SELECT result FROM pull_receipts WHERE request_id=?',
+                                                 (value['requestId'],)).fetchone()[0])
+            receipt = {"requestId": value["requestId"], "state": "UNCERTAIN",
+                       "head": None, "error": "PULL_EXECUTION_UNCONFIRMED", "checkedAt": checked_at(),
+                       "phase": progress['phase'], "mergeStarted": progress['mergeStarted'],
+                       "workerFinished": not self.guard.poisoned, "knownFailure": False}
+        if timings:
+            # Only bounded durations, no Git paths/credentials/CLI output.
+            timings['executeTotal'] = round((time.perf_counter() - started) * 1000)
+            receipt['timingsMs'] = timings
+        with self._db() as db:
+            db.execute("UPDATE pull_receipts SET state=?,result=? WHERE request_id=?",
+                       (receipt["state"], json.dumps(receipt, sort_keys=True), value["requestId"]))
+        # Readback can confirm a pre-merge failure, but never dispatch Git.
+        return self.status(value['requestId'], repo_id=value['repoId']) if receipt['state'] == 'UNCERTAIN' else receipt
+
 
     def _record_refusal(self, value, frozen, error):
         with self._db() as db:
