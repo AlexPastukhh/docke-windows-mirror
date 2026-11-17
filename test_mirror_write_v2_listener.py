@@ -7,6 +7,7 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 import json
+import ssl
 import threading
 import unittest
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ class PrivateWriteListenerTests(unittest.TestCase):
         server.daemon_threads = True
         server.owner_write_opt_in = False
         server.private_write_bridge = self.bridge
-        server.owner_write_peer_gate = lambda _peer: True
+        server.owner_write_peer_gate = lambda _cert, _peer: True
         server.gateway_secret = READ
         server.allowed_repos = self.reads.allowed_repos
         server.read_v2 = self.reads
@@ -95,20 +96,40 @@ class PrivateWriteListenerTests(unittest.TestCase):
         ingress.assert_not_called()
         self.assertEqual(self.count_bindings(),0)
 
-    def test_peer_gate_exception_or_nonboolean_does_not_allow_write(self):
+    def test_peer_gate_requires_real_peer_cert_and_exact_trust(self):
         class FakeSSL:
+            context=SimpleNamespace(verify_mode=ssl.CERT_REQUIRED)
             def version(self):
                 return 'TLSv1.3'
+            def getpeercert(self, *, binary_form):
+                assert binary_form is True
+                return b'ephemeral-verified-client-cert'
         handler=object.__new__(PrivateWriteV2Handler)
         handler.connection=FakeSSL()
         handler.client_address=('192.0.2.100',53000)
-        handler.server=SimpleNamespace(owner_write_peer_gate=lambda _peer: 1)
+        seen=[]
+        handler.server=SimpleNamespace(
+            owner_write_peer_gate=lambda cert, peer: (
+                seen.append((cert,peer)) or 1))
         with patch('mirror_api.write_v2_listener.ssl.SSLSocket',FakeSSL):
             self.assertFalse(handler._transport_allowed())  # truthy is not True
-            handler.server.owner_write_peer_gate=lambda _peer: (_ for _ in ()).throw(OSError('peer unavailable'))
+            handler.server.owner_write_peer_gate=lambda _cert, _peer: (
+                (_ for _ in ()).throw(OSError('peer unavailable')))
             self.assertFalse(handler._transport_allowed())
-            handler.server.owner_write_peer_gate=lambda _peer: True
+            handler.server.owner_write_peer_gate=lambda cert,peer: (
+                cert == b'ephemeral-verified-client-cert' and
+                peer == ('192.0.2.100',53000))
             self.assertTrue(handler._transport_allowed())
+            self.assertEqual(seen,[(
+                b'ephemeral-verified-client-cert',('192.0.2.100',53000))])
+            handler.connection.context=SimpleNamespace(verify_mode=ssl.CERT_OPTIONAL)
+            self.assertFalse(handler._transport_allowed())
+            handler.connection.context=SimpleNamespace(verify_mode=ssl.CERT_REQUIRED)
+            handler.connection.getpeercert=lambda **kw: None
+            self.assertFalse(handler._transport_allowed())
+            handler.connection.getpeercert=lambda **kw: b''
+            self.assertFalse(handler._transport_allowed())
+            handler.connection.getpeercert=lambda **kw: b'ephemeral-verified-client-cert'
             handler.connection.version=lambda: 'TLSv1.1'
             self.assertFalse(handler._transport_allowed())
         self.assertEqual(self.count_bindings(),0)
