@@ -59,12 +59,26 @@ class PinnedEd25519Keys:
     unconsumed persisted previews cannot be reused with stale trust state.
     Do not construct from caller JSON or a remote key endpoint.
     """
-    def __init__(self, active):
+    def __init__(self, active, *, owner_epoch=None):
+        # An optional epoch keeps the standalone verifier usable in offline
+        # compatibility tests. It is MANDATORY for any machine WRITE binding.
+        # Owner chooses a new 64-hex epoch on every trust-policy rotation, even
+        # if older public bytes are reintroduced. No epoch comes from HTTP.
+        require(owner_epoch is None or _match(owner_epoch, DIGEST), 'UNKNOWN_KEY')
         require(type(active) is dict and len(active) <= 8, 'UNKNOWN_KEY')
         for key_id, key in active.items():
             require(_match(key_id, KEY_ID) and type(key) is bytes and len(key) == 32,
                     'UNKNOWN_KEY')
         self._active = dict(active)
+        self._revision = None if owner_epoch is None else hashlib.sha256(_canonical({
+            'ownerEpoch': owner_epoch,
+            'activeEd25519Keys': {key: value.hex() for key, value in sorted(active.items())},
+        })).hexdigest()
+
+    @property
+    def revision(self):
+        """Digest of owner epoch AND exact active key set; never caller input."""
+        return self._revision
 
     def get(self, key_id):
         require(_match(key_id, KEY_ID), 'UNKNOWN_KEY')

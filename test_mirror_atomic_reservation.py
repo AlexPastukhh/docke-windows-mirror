@@ -35,8 +35,10 @@ class AtomicReservationTests(unittest.TestCase):
         backend.windows_root.mkdir()
         self.core = MirrorCore(backend, root / 'receipts.sqlite')
         self.addCleanup(self.core.close)
+        self.pins = PinnedEd25519Keys({'fixture': b'\x07' * 32}, owner_epoch='e' * 64)
         api = CoreReadV2(self.core, allowed_repos=[REPO],
-                         inventories={'mirror-pilot': [REPO]}, machine_generation='c' * 64)
+                         inventories={'mirror-pilot': [REPO]}, machine_generation='c' * 64,
+                         owner_signing_pins=self.pins)
         self.machine = api._bound_reads()
         self.ticks = [TIME]
         self.machine.clock = lambda: self.ticks[0]
@@ -45,7 +47,6 @@ class AtomicReservationTests(unittest.TestCase):
         self.assertEqual(created['data']['blockers'], [])
         self.preview = self.machine.persisted_preview_for_ask(
             REPO, ACTOR, created['data']['previewId'], GEN)
-        self.pins = PinnedEd25519Keys({'fixture': b'\x07' * 32})
         self.dispatch = self._dispatch()
 
     def _dispatch(self, request_id=EFFECT):
@@ -71,6 +72,81 @@ class AtomicReservationTests(unittest.TestCase):
         with self.machine.worker._db() as db:
             return (db.execute('SELECT COUNT(*) FROM machine_bindings').fetchone()[0],
                     db.execute('SELECT COUNT(*) FROM pull_receipts').fetchone()[0])
+
+    def test_owner_pin_rotation_invalidates_frozen_preview_but_keeps_receipt(self):
+        self.reserve()
+        original_generation = self.machine.generation
+        self.assertEqual(self.counts(), (1, 1))
+        for label, pins in (
+                ('changed-public-key', PinnedEd25519Keys(
+                    {'fixture': b'\x08' * 32}, owner_epoch='e' * 64)),
+                ('changed-owner-epoch', PinnedEd25519Keys(
+                    {'fixture': b'\x07' * 32}, owner_epoch='f' * 64)),
+                ('all-keys-revoked', PinnedEd25519Keys({}, owner_epoch='f' * 64))):
+            with self.subTest(label=label):
+                api = CoreReadV2(self.core, allowed_repos=[REPO],
+                                 inventories={'mirror-pilot': [REPO]},
+                                 machine_generation='c' * 64, owner_signing_pins=pins)
+                rotated = api._bound_reads()
+                rotated.clock = self.machine.clock
+                self.assertNotEqual(rotated.generation, original_generation)
+                with self.assertRaisesRegex(ReadError, 'PREVIEW_STALE'):
+                    rotated.persisted_preview_for_ask(
+                        REPO, ACTOR, self.dispatch['previewId'], GEN)
+                # Post-rotation receipt readback never needs the old signer,
+                # its private material or an unexpired preview.
+                self.assertEqual(rotated.lookup(REPO, ACTOR, EFFECT)['effect'], 'UNKNOWN')
+                self.assertEqual(self.counts(), (1, 1))
+
+    def test_owner_pin_profile_is_required_and_caller_cannot_replace_it(self):
+        copied = PinnedEd25519Keys({'fixture': b'\x07' * 32}, owner_epoch='e' * 64)
+        self.assertEqual(copied.revision, self.pins.revision)
+        with patch('mirror_api.proof_v2._verify_ed25519') as crypto, \
+             self.assertRaisesRegex(ReadError, 'UNKNOWN_KEY'):
+            self.machine.reserve_signed_candidate(
+                dispatch=self.dispatch, actor=ACTOR, repo=REPO,
+                request_id=EFFECT, gateway_generation=GEN, owner_pins=copied)
+        crypto.assert_not_called()
+        self.assertEqual(self.counts(), (0, 0))
+        with self.assertRaisesRegex(ReadError, 'UNKNOWN_KEY'):
+            CoreReadV2(self.core, allowed_repos=[REPO],
+                       inventories={'mirror-pilot': [REPO]}, machine_generation='c' * 64,
+                       owner_signing_pins=PinnedEd25519Keys({'fixture': b'\x07' * 32}))
+        with self.assertRaisesRegex(ReadError, 'UNKNOWN_KEY'):
+            CoreReadV2(self.core, allowed_repos=[REPO],
+                       inventories={'mirror-pilot': [REPO]}, machine_generation=None,
+                       owner_signing_pins=self.pins)
+        # READ v2 with no owner profile remains available and cannot admit WRITE.
+        read_only = CoreReadV2(self.core, allowed_repos=[REPO],
+                               inventories={'mirror-pilot': [REPO]},
+                               machine_generation='c' * 64)._bound_reads()
+        with patch('mirror_api.proof_v2._verify_ed25519') as crypto, \
+             self.assertRaisesRegex(ReadError, 'UNKNOWN_KEY'):
+            read_only.reserve_signed_candidate(
+                dispatch=self.dispatch, actor=ACTOR, repo=REPO,
+                request_id=EFFECT, gateway_generation=GEN, owner_pins=self.pins)
+        crypto.assert_not_called()
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_owner_profile_epoch_and_exact_key_set_bind_generation(self):
+        one = PinnedEd25519Keys({'key-b': b'\x01' * 32,
+                                 'key-a': b'\x02' * 32}, owner_epoch='0' * 64)
+        two = PinnedEd25519Keys({'key-a': b'\x02' * 32,
+                                 'key-b': b'\x01' * 32}, owner_epoch='0' * 64)
+        self.assertEqual(one.revision, two.revision)
+        self.assertNotEqual(one.revision, PinnedEd25519Keys(
+            {'key-a': b'\x02' * 32, 'key-b': b'\x01' * 32},
+            owner_epoch='1' * 64).revision)
+        self.assertNotEqual(one.revision, PinnedEd25519Keys(
+            {'key-a': b'\x02' * 32}, owner_epoch='0' * 64).revision)
+        for invalid in ('not-hex', 'G' * 64, True, 1, ''):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ReadError,'UNKNOWN_KEY'):
+                PinnedEd25519Keys({'fixture': b'\x07' * 32}, owner_epoch=invalid)
+        old = self.pins
+        self.assertEqual(old.get('fixture'), b'\x07' * 32)
+        with self.assertRaisesRegex(ReadError, 'UNKNOWN_KEY'):
+            old.get('unknown')
+        self.assertEqual(self.counts(), (0, 0))
 
     def test_atomic_reservation_binds_same_receipt_without_git(self):
         with patch.object(self.machine.worker, 'run') as run, \
