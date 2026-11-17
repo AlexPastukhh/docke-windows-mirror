@@ -129,6 +129,39 @@ class AtomicReservationTests(unittest.TestCase):
             self.reserve(self._dispatch(BROWSER), request_id=BROWSER)
         self.assertEqual(self.counts(), (1, 2))
 
+    def test_browser_cannot_adopt_exact_machine_receipt_even_after_execution(self):
+        # Before this gate, a byte-for-byte matching Browser payload could
+        # read a machine receipt via PullWorker.run's existing-UUID shortcut.
+        self.reserve()
+        with self.machine.worker._db() as db:
+            payload = json.loads(db.execute(
+                'SELECT payload FROM pull_receipts WHERE request_id=?',
+                (EFFECT,)).fetchone()[0])
+        with patch.object(self.machine.worker,'_execute') as git, \
+             patch.object(self.machine.worker,'status') as status:
+            with self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+                self.machine.worker.run(payload,repo_id=REPO,allowed_repos={REPO})
+            git.assert_not_called()
+            status.assert_not_called()
+        with self.machine.worker._db() as db:
+            db.execute('UPDATE pull_receipts SET state=? WHERE request_id=?',
+                       ('EXECUTED',EFFECT))
+        with patch.object(self.machine.worker,'status') as status:
+            with self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+                self.machine.worker.run(payload,repo_id=REPO,allowed_repos={REPO})
+            status.assert_not_called()
+
+    def test_browser_cannot_take_machine_read_uuid_without_existing_receipt(self):
+        # READ UUID exists before any machine effect reservation. Browser may
+        # not insert its own receipt under that identity.
+        browser=dict(requestId=CREATE,repoId=REPO,expectedHead='b'*40,
+                     targetSha='a'*40,origin=ORIGIN)
+        with patch.object(self.machine.worker,'_execute') as git, \
+             self.assertRaisesRegex(PullDenied,'MACHINE_REQUEST_ID_PRIVATE'):
+            self.machine.worker.run(browser,repo_id=REPO,allowed_repos={REPO})
+        git.assert_not_called()
+        self.assertEqual(self.counts(),(0,0))
+
     def test_browser_after_machine_reservation_blocked_before_git(self):
         self.reserve()
         browser = dict(requestId=BROWSER, repoId=REPO, expectedHead='b' * 40,

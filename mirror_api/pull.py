@@ -264,6 +264,24 @@ class PullWorker:
                 return 'REPOSITORY_OPERATION_PENDING'
         return None
 
+    @staticmethod
+    def _machine_uuid_reserved(db, request_id):
+        """A Browser request cannot borrow a machine READ or effect UUID.
+
+        Older Browser-only stores have no machine tables. If present, both
+        machine namespaces are private even when the saved receipt payload
+        happens to be byte-for-byte identical to Browser's payload.
+        """
+        for table in ('machine_previews', 'machine_bindings'):
+            present = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if present and db.execute(
+                    f'SELECT 1 FROM {table} WHERE request_id=?',
+                    (request_id,)).fetchone():
+                return True
+        return False
+
     def run(self, body, *, repo_id, allowed_repos):
         value = self.payload(body)
         if value["repoId"] != repo_id or repo_id not in allowed_repos:
@@ -276,6 +294,11 @@ class PullWorker:
             refusal = None
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
+                # Keep Browser and signed machine UUID namespaces disjoint.
+                # A matching historical machine receipt is never a Browser
+                # status shortcut, and a machine READ UUID cannot be stolen.
+                if self._machine_uuid_reserved(db, value['requestId']):
+                    raise PullDenied('MACHINE_REQUEST_ID_PRIVATE')
                 # Reservation is durable before touching Git. Any repeated request
                 # becomes status-only, including after crash or timeout.
                 row = db.execute("SELECT payload FROM pull_receipts WHERE request_id=?",
