@@ -107,6 +107,125 @@ class HostedWindowsP4CryptoTests(unittest.TestCase):
                 db.execute('SELECT COUNT(*) FROM machine_bindings').fetchone()[0],
                 db.execute('SELECT COUNT(*) FROM pull_receipts').fetchone()[0])
 
+    def _reopen_signed_bridge(self):
+        """Simulate a new worker process using the SAME durable SQLite store.
+
+        Closing the old Core releases its WriterGuard. Reconstructing all
+        owner-pinned READ/WRITE objects rules out any in-memory handoff permit
+        surviving the restart. This is not a genuine OS kill/Windows cutover.
+        """
+        self.core.close()
+        reopened = MirrorCore(self.core.backend, self.core.receipt_db)
+        self.addCleanup(reopened.close)
+        # Fresh in-memory owner trust profile, same pinned public bytes/epoch.
+        keys = PinnedEd25519Keys(
+            {'fixture': self.pins.get('fixture')}, owner_epoch='e' * 64)
+        self.assertEqual(keys.revision, self.pins.revision)
+        reads = CoreReadV2(reopened, allowed_repos=[REPO],
+                           inventories={'mirror-pilot': [REPO]},
+                           machine_generation='c' * 64,
+                           owner_signing_pins=keys)
+        restarted = PrivateWriteBridge(
+            ingress=WriteIngressProfile(read_bearer=READ, write_bearer=WRITE,
+                                        allowed_repos=[REPO], signing_pins=keys),
+            reads=reads, gateway_generation=GEN, source_enabled=True)
+        restarted._machine.clock = lambda: self.ticks[0]
+        self.assertEqual(restarted._machine.worker._machine_handoff_permits, {})
+        return restarted
+
+    def test_real_signed_reserved_then_restart_never_rearms_before_claim(self):
+        # Signed D-04 reservation is atomically committed to SQLite. The
+        # simulated process dies before it consumes the volatile permit.
+        with patch.object(self.machine.worker, '_run_machine_reserved',
+                          side_effect=KeyboardInterrupt), \
+             patch.object(self.machine.worker, '_execute') as git, \
+             self.assertRaises(KeyboardInterrupt):
+            self.send()
+        git.assert_not_called()
+        with self.machine.worker._db() as db:
+            row = db.execute(
+                'SELECT state,result FROM pull_receipts WHERE request_id=?',
+                (EFFECT,)).fetchone()
+            self.assertEqual(row[0], 'DISPATCHED')
+            self.assertEqual(json.loads(row[1])['phase'], 'RESERVED_MACHINE')
+        self.assertEqual(self.counts(), (1, 1))
+        restarted = self._reopen_signed_bridge()
+        with patch.object(restarted._machine.worker, '_execute') as git:
+            old = self.send(bridge=restarted)
+            self.assertEqual((old['workerState'], old['effect']),
+                             ('DISPATCHED', 'UNKNOWN'))
+            git.assert_not_called()
+        with restarted._machine.worker._db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM pull_receipts').fetchone()[0], 1)
+
+    def test_real_signed_durable_claim_survives_restart_without_second_git(self):
+        # A BaseException after the durable MACHINE_CLAIMED CAS cannot be
+        # treated as an unclaimed effect, even after restart and lost ACK.
+        with patch.object(self.machine.worker, '_execute',
+                          side_effect=KeyboardInterrupt) as git, \
+             self.assertRaises(KeyboardInterrupt):
+            self.send()
+        self.assertEqual(git.call_count, 1)
+        with self.machine.worker._db() as db:
+            row = db.execute(
+                'SELECT state,result FROM pull_receipts WHERE request_id=?',
+                (EFFECT,)).fetchone()
+            self.assertEqual(row[0], 'DISPATCHED')
+            self.assertEqual(json.loads(row[1])['phase'], 'MACHINE_CLAIMED')
+        restarted = self._reopen_signed_bridge()
+        self.ticks[0] += 300  # original preview/proof have expired
+        with patch.object(restarted._machine.worker, '_execute') as no_retry:
+            result = self.send(bridge=restarted)
+            self.assertEqual((result['workerState'], result['effect']),
+                             ('DISPATCHED', 'UNKNOWN'))
+            no_retry.assert_not_called()
+        self.assertEqual(restarted._machine.lookup(REPO, ACTOR, EFFECT)['effect'],
+                         'UNKNOWN')
+
+    def test_real_signed_completed_lost_ack_restarted_receipt_is_readback_only(self):
+        # Successful effect's HTTP response is discarded. A new process must
+        # read its saved terminal receipt, not re-run _execute or a new proof.
+        with patch.object(self.machine.worker, '_execute',
+                          return_value={'requestId': EFFECT, 'state': 'EXECUTED',
+                                        'head': self.dispatch['targetSha']}) as git:
+            self.send()  # pretend the client never receives this result
+            self.assertEqual(git.call_count, 1)
+        restarted = self._reopen_signed_bridge()
+        self.ticks[0] += 400
+        tampered = self._tamper_signature(self.dispatch)
+        with patch.object(restarted._machine.worker, '_execute') as no_retry:
+            receipt = self.send(tampered, bridge=restarted)
+            self.assertEqual((receipt['workerState'], receipt['effect']),
+                             ('EXECUTED', 'CONFIRMED'))
+            self.assertEqual(receipt['expectedTarget'],
+                             self.dispatch['targetSha'])
+            no_retry.assert_not_called()
+        with restarted._machine.worker._db() as db:
+            self.assertEqual(db.execute(
+                "SELECT state FROM pull_receipts WHERE request_id=?",
+                (EFFECT,)).fetchone()[0], 'EXECUTED')
+
+    def test_real_signed_different_uuid_cannot_bypass_crashed_pending_writer(self):
+        with patch.object(self.machine.worker, '_run_machine_reserved',
+                          side_effect=KeyboardInterrupt), \
+             self.assertRaises(KeyboardInterrupt):
+            self.send()
+        restarted = self._reopen_signed_bridge()
+        # New approval/signature/UUID does not clear the old unresolved
+        # reservation or gain another Git effect.
+        other = self.signed_dispatch(
+            request_id='5b25bb8a-f39a-4ddc-8ac6-07114262d6d7')
+        with patch.object(restarted._machine.worker, '_execute') as git, \
+             self.assertRaises(ReadError):
+            self.send(other, bridge=restarted)
+        git.assert_not_called()
+        with restarted._machine.worker._db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM pull_receipts').fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM machine_bindings').fetchone()[0], 1)
+
     def test_real_valid_ed25519_one_effect_then_lookup_after_proof_expiry(self):
         with patch.object(self.machine.worker, '_execute',
                           return_value={'requestId': EFFECT, 'state': 'EXECUTED',
