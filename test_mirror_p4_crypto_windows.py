@@ -583,3 +583,201 @@ class HostedWindowsP4MutualTLSTests(unittest.TestCase):
             self.assertEqual((status, denied['error']), (405, 'GATEWAY_READ_ONLY'))
             git.assert_not_called()
         self.assertEqual(HostedWindowsP4CryptoTests.counts(self), (0, 0))
+
+
+@unittest.skipUnless(importlib.util.find_spec('cryptography'),
+                     'Hosted Windows CI requires real Ed25519 and local Git')
+class HostedWindowsP4SignedRealGitTests(unittest.TestCase):
+    """P4 real Ed25519 -> SQLite -> guarded Git --ff-only, temporary local clones.
+
+    Production fetch forbids file remotes and remains unchanged. ONLY the
+    fixture's intercepted fetch substitutes an isolated local bare repository
+    for the synthetic GitHub origin; ancestry, ff-only, Git preflights,
+    checkpoints and final readback run through the real worker and subprocess.
+    Neither installed Windows nor any network service is contacted.
+    """
+
+    signed_dispatch = HostedWindowsP4CryptoTests.signed_dispatch
+    send = HostedWindowsP4CryptoTests.send
+
+    def setUp(self):
+        import subprocess
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+
+        temp = tempfile.TemporaryDirectory(prefix='mirror-p4-signed-git-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.windows_root = self.root / 'Repos'
+        self.windows_root.mkdir()
+        self.publisher = self.root / 'publisher'
+        self.publisher.mkdir()
+        self.bare = self.root / 'origin.git'
+        self.clone = self.windows_root / REPO
+        self.original_origin = 'https://github.com/AlexPastukhh/' + REPO + '.git'
+
+        def git(repo, *args):
+            result = subprocess.run(
+                ['git', '-C', str(repo), *args], check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            return result.stdout.decode('utf-8').strip()
+
+        self.git = git
+        git(self.publisher, 'init', '-q')
+        git(self.publisher, 'checkout', '-qb', 'main')
+        git(self.publisher, 'config', 'user.name', 'Fixture Only')
+        git(self.publisher, 'config', 'user.email', 'fixture@example.invalid')
+        self.notes = self.clone / 'README.md'
+        (self.publisher / 'README.md').write_text('old\n', encoding='utf-8')
+        git(self.publisher, 'add', 'README.md')
+        git(self.publisher, 'commit', '-qm', 'old')
+        subprocess.run(['git', 'clone', '-q', '--bare', str(self.publisher),
+                        str(self.bare)], check=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=15)
+        subprocess.run(['git', 'clone', '-q', '-b', 'main', str(self.bare),
+                        str(self.clone)], check=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=15)
+        self.old_sha = git(self.clone, 'rev-parse', 'HEAD')
+        (self.publisher / 'README.md').write_text('old\nnew\n', encoding='utf-8')
+        git(self.publisher, 'add', 'README.md')
+        git(self.publisher, 'commit', '-qm', 'new')
+        self.target_sha = git(self.publisher, 'rev-parse', 'HEAD')
+        git(self.publisher, 'push', '-q', str(self.bare), 'main')
+        git(self.clone, 'remote', 'set-url', 'origin', self.original_origin)
+        self.assertEqual(git(self.clone, 'status', '--porcelain=v1'), '')
+        self.assertNotEqual(self.old_sha, self.target_sha)
+
+        backend = BoundBackend()
+        backend.windows_root = self.windows_root
+        inventory = backend.inventory
+
+        def fixture_inventory(*args, **kwargs):
+            result = inventory(*args, **kwargs)
+            row = result['repositories'][0]
+            row['docker']['primary']['head'] = self.target_sha
+            row['windows']['head'] = self.old_sha
+            row['github']['head'] = self.target_sha
+            return result
+
+        backend.inventory = fixture_inventory
+        self.core = MirrorCore(backend, self.root / 'receipt.sqlite')
+        self.addCleanup(self.core.close)
+        self.signer = Ed25519PrivateKey.generate()
+        public = self.signer.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw)
+        self.pins = PinnedEd25519Keys({'fixture': public},
+                                      owner_epoch='e' * 64)
+        self.reads = CoreReadV2(
+            self.core, allowed_repos=[REPO],
+            inventories={'mirror-pilot': [REPO]},
+            machine_generation='c' * 64, owner_signing_pins=self.pins)
+        self.machine = self.reads._bound_reads()
+        self.ticks = [TIME]
+        self.machine.clock = lambda: self.ticks[0]
+        created = self.reads.call(
+            'preview_windows_pull_v2', REPO, {}, principal=ACTOR,
+            request_id=CREATE, gateway_generation=GEN)
+        self.assertIsNone(created['error'])
+        self.assertEqual(created['data']['blockers'], [])
+        self.preview = self.machine.persisted_preview_for_ask(
+            REPO, ACTOR, created['data']['previewId'], GEN)
+        self.assertEqual(self.preview['snapshot']['expectedHead'], self.old_sha)
+        self.assertEqual(self.preview['snapshot']['targetSha'], self.target_sha)
+        self.ingress = WriteIngressProfile(
+            read_bearer=READ, write_bearer=WRITE,
+            allowed_repos=[REPO], signing_pins=self.pins)
+        self.bridge = PrivateWriteBridge(
+            ingress=self.ingress, reads=self.reads,
+            gateway_generation=GEN, source_enabled=True)
+        self.bridge._machine.clock = self.machine.clock
+        self.dispatch = self.signed_dispatch()
+        self.fetches = []
+        self.merges = []
+
+    def live_git_boundary(self):
+        """Patch only remote observation and file fetch in local test fixture."""
+        import subprocess
+        from contextlib import ExitStack
+        from mirror_api.commands import command as actual_command
+
+        def fetch_from_isolated_bare(argv, **kwargs):
+            if 'fetch' in argv:
+                self.assertIn('protocol.file.allow=never', argv)
+                self.assertIn('origin', argv)
+                self.fetches.append(tuple(argv))
+                patched = list(argv)
+                patched[patched.index('origin')] = str(self.bare)
+                patched[patched.index('protocol.file.allow=never')] = (
+                    'protocol.file.allow=always')
+                # Preserve the REAL WriterGuard/Job-controlled command path.
+                return actual_command(patched, **kwargs)
+            if 'merge' in argv and '--ff-only' in argv:
+                self.merges.append(tuple(argv))
+            return actual_command(argv, **kwargs)
+
+        source = [{
+            'kind': 'primary', 'branch': 'main',
+            'head': self.target_sha, 'origin': self.original_origin,
+            'clean': True, 'targetEligible': True}]
+        stack = ExitStack()
+        stack.enter_context(patch('mirror_api.pull.docker_inventory',
+                                  return_value={REPO: source}))
+        stack.enter_context(patch('mirror_api.pull.github_main',
+                                  return_value={'head': self.target_sha,
+                                                'error': None}))
+        stack.enter_context(patch('mirror_api.pull.command',
+                                  side_effect=fetch_from_isolated_bare))
+        return stack
+
+    def test_signed_p4_real_git_ff_only_and_status_only_replay(self):
+        with self.live_git_boundary():
+            first = self.send()
+            second = self.send()
+        self.assertEqual((first['workerState'], first['effect']),
+                         ('EXECUTED', 'CONFIRMED'))
+        self.assertEqual(second['effect'], 'CONFIRMED')
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'),
+                         self.target_sha)
+        self.assertEqual(self.git(self.clone, 'status', '--porcelain=v1'), '')
+        self.assertEqual(self.notes.read_text(encoding='utf-8').replace('\r\n', '\n'),
+                         'old\nnew\n')
+        self.assertEqual(len(self.fetches), 1)
+        self.assertEqual(len(self.merges), 1)
+        self.assertIn(self.target_sha, self.merges[0])
+        with self.machine.worker._db() as db:
+            self.assertEqual(
+                db.execute('SELECT COUNT(*) FROM pull_receipts').fetchone()[0],
+                1)
+            self.assertEqual(
+                db.execute('SELECT COUNT(*) FROM machine_bindings').fetchone()[0],
+                1)
+
+    def test_signed_p4_dirty_checkout_never_fetches_or_merges(self):
+        self.notes.write_text('owner dirty\n', encoding='utf-8')
+        with self.live_git_boundary():
+            denied = self.send()
+        self.assertNotEqual(denied['effect'], 'CONFIRMED')
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), self.old_sha)
+        self.assertEqual(self.notes.read_text(encoding='utf-8'), 'owner dirty\n')
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.merges, [])
+
+    def test_signed_p4_fetched_remote_move_never_merges_unpinned_sha(self):
+        # The trusted preview and signed target remain frozen, but the *bare*
+        # fixture advances once more. FETCH_HEAD must equal pinned target or
+        # the worker must refuse before any fast-forward on Windows.
+        (self.publisher / 'README.md').write_text(
+            'old\nnew\nunapproved move\n', encoding='utf-8')
+        self.git(self.publisher, 'add', 'README.md')
+        self.git(self.publisher, 'commit', '-qm', 'unapproved')
+        changed = self.git(self.publisher, 'rev-parse', 'HEAD')
+        self.git(self.publisher, 'push', '-q', str(self.bare), 'main')
+        self.assertNotEqual(changed, self.target_sha)
+        with self.live_git_boundary():
+            denied = self.send()
+        self.assertNotEqual(denied['effect'], 'CONFIRMED')
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'HEAD'), self.old_sha)
+        self.assertEqual(len(self.fetches), 1)
+        self.assertEqual(self.merges, [])
+        self.assertEqual(self.git(self.clone, 'rev-parse', 'FETCH_HEAD'), changed)
