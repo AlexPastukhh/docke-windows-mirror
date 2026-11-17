@@ -226,6 +226,77 @@ class HostedWindowsP4CryptoTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM machine_bindings').fetchone()[0], 1)
 
+    def _os_exit_signed_child(self, mode):
+        """A real OS child dies at a durable checkpoint, never running Git."""
+        import subprocess
+        import sys
+        payload = {
+            'mode': mode,
+            'windowsRoot': str(self.core.windows_root),
+            'receiptDb': str(self.core.receipt_db),
+            'ownerPublicKey': self.pins.get('fixture').hex(),
+            'dispatch': self.dispatch,
+        }
+        self.core.close()  # release any test-only Windows WriterGuard handle
+        finished = subprocess.run(
+            [sys.executable, '-B', '-m', 'test_mirror_p4_os_exit_child'],
+            input=json.dumps(payload, separators=(',', ':')), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(Path(__file__).resolve().parent),
+            timeout=35, check=False)
+        codes = {'before-claim': 71, 'after-claim': 72, 'lost-ack': 73}
+        # Never print even fixture credentials or signed request material.
+        self.assertEqual(finished.returncode, codes[mode],
+                         'P4 fixture child did not exit at the expected checkpoint')
+        self.assertEqual(finished.stdout, '')
+        return self._reopen_signed_bridge()
+
+    def test_hosted_windows_os_exit_after_reservation_is_status_only(self):
+        restarted = self._os_exit_signed_child('before-claim')
+        with restarted._machine.worker._db() as db:
+            receipt = db.execute('SELECT state,result FROM pull_receipts '
+                                 'WHERE request_id=?', (EFFECT,)).fetchone()
+            self.assertEqual(receipt[0], 'DISPATCHED')
+            self.assertEqual(json.loads(receipt[1])['phase'], 'RESERVED_MACHINE')
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM machine_bindings').fetchone()[0], 1)
+        self.ticks[0] += 140
+        with patch.object(restarted._machine.worker, '_execute') as no_git:
+            replay = self.send(bridge=restarted)
+            self.assertEqual((replay['workerState'], replay['effect']),
+                             ('DISPATCHED', 'UNKNOWN'))
+            no_git.assert_not_called()
+
+    def test_hosted_windows_os_exit_after_claim_cannot_reexecute(self):
+        restarted = self._os_exit_signed_child('after-claim')
+        with restarted._machine.worker._db() as db:
+            receipt = db.execute('SELECT state,result FROM pull_receipts '
+                                 'WHERE request_id=?', (EFFECT,)).fetchone()
+            self.assertEqual(receipt[0], 'DISPATCHED')
+            self.assertEqual(json.loads(receipt[1])['phase'], 'MACHINE_CLAIMED')
+        self.ticks[0] += 140
+        with patch.object(restarted._machine.worker, '_execute') as no_git:
+            replay = self.send(bridge=restarted)
+            self.assertEqual((replay['workerState'], replay['effect']),
+                             ('DISPATCHED', 'UNKNOWN'))
+            no_git.assert_not_called()
+
+    def test_hosted_windows_os_exit_after_terminal_receipt_loses_ack_only(self):
+        restarted = self._os_exit_signed_child('lost-ack')
+        self.ticks[0] += 140
+        with patch.object(restarted._machine.worker, '_execute') as no_git:
+            replay = self.send(self._tamper_signature(self.dispatch),
+                               bridge=restarted)
+            self.assertEqual((replay['workerState'], replay['effect']),
+                             ('EXECUTED', 'CONFIRMED'))
+            self.assertEqual(replay['expectedTarget'],
+                             self.dispatch['targetSha'])
+            no_git.assert_not_called()
+        with restarted._machine.worker._db() as db:
+            self.assertEqual(db.execute(
+                'SELECT state FROM pull_receipts WHERE request_id=?',
+                (EFFECT,)).fetchone()[0], 'EXECUTED')
+
     def test_real_valid_ed25519_one_effect_then_lookup_after_proof_expiry(self):
         with patch.object(self.machine.worker, '_execute',
                           return_value={'requestId': EFFECT, 'state': 'EXECUTED',
