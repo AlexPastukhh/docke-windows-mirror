@@ -24,3 +24,12 @@ jobs:
           architecture: 'x64'
       - name: Controlled Windows fixtures only
         run: python -B -m unittest -v test_mirror_core test_mirror_commands test_mirror_process_guard
+      # Hosted runner only: no private owner credentials, live Windows host,
+      # installed Mirror listener or real Git effect. Pin to the existing
+      # Fortis Approvals owner-verifier dependency version.
+      - name: Install P4 test-only Ed25519 verifier
+        run: python -m pip install --disable-pip-version-check --no-input cryptography==50.0.2
+      - name: Windows P4 real Ed25519 and private HTTP/ledger negative fixtures
+        run: |
+          python -B -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; assert Ed25519PrivateKey.generate()"
+          python -B -m unittest -v test_mirror_p4_crypto_windows test_mirror_proof_v2 test_mirror_atomic_reservation test_mirror_write_v2_ingress test_mirror_write_v2_bridge test_mirror_write_v2_listener
