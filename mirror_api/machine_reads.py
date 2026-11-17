@@ -51,9 +51,10 @@ class MachineReads:
     MAX_PREVIEWS = 4096
     MAX_ACTIVE_PER_ACTOR = 64
 
-    def __init__(self, core, generation, *, clock=None):
+    def __init__(self, core, generation, *, clock=None, signing_pins=None):
         require(type(generation) is str and GENERATION.fullmatch(generation))
         self.core, self.generation, self.clock = core, generation, clock or time.time
+        self._signing_pins = signing_pins
         # Exactly the shared Core worker/store. Initializing its ledger binds the
         # store but never claims a writer, invokes status/recovery or starts Git.
         self.worker = core.worker()
@@ -299,6 +300,13 @@ class MachineReads:
             if prior is not None:
                 return prior
 
+        # New effects require the exact owner-bound signing profile whose
+        # revision was hashed into this machine's preview generation. Incoming
+        # key lists and a different instance with equal public keys are never
+        # authority. Existing UUID lookup above remains possible after rotation.
+        require(self._signing_pins is not None and
+                owner_pins is self._signing_pins and
+                owner_pins.revision is not None, 'UNKNOWN_KEY')
         # No broad SQLite transaction spans cryptographic verification.
         # The row is rechecked for exact equality *inside* the write transaction.
         stored = self.persisted_preview_for_ask(repo, actor, identity['previewId'],

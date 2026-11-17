@@ -100,7 +100,8 @@ def actions(*, bound=False):
 
 
 class CoreReadV2:
-    def __init__(self, core, *, allowed_repos, inventories, machine_generation=None):
+    def __init__(self, core, *, allowed_repos, inventories, machine_generation=None,
+                 owner_signing_pins=None):
         require(type(allowed_repos) in (list, tuple, frozenset) and
                 1 <= len(allowed_repos) <= 128 and len(set(allowed_repos)) == len(allowed_repos))
         require(all(type(x) is str and REPO.fullmatch(x) for x in allowed_repos))
@@ -117,7 +118,17 @@ class CoreReadV2:
         effective = None if machine_generation is None else digest({
             'deployment': machine_generation, 'repositories': sorted(self.allowed_repos),
             'inventories': self.inventories, 'contract': 'mirror-principal-reads-v2.1'})
+        # Source-only opt-in. An owner-pinned signing profile is NEVER loaded
+        # from a request and cannot activate WRITE via the existing GET server.
+        if owner_signing_pins is not None:
+            from .proof_v2 import PinnedEd25519Keys
+            require(type(owner_signing_pins) is PinnedEd25519Keys and
+                    owner_signing_pins.revision is not None and effective is not None,
+                    'UNKNOWN_KEY')
+            effective = digest({'readGeneration': effective,
+                                'ownerSigningPins': owner_signing_pins.revision})
         self.core, self.machine_generation, self._machine = core, effective, None
+        self._owner_signing_pins = owner_signing_pins
 
     def _actions(self):
         return actions(bound=self.machine_generation is not None and self.core.configured)
@@ -127,7 +138,8 @@ class CoreReadV2:
         with self.core.lock:
             if self._machine is None:
                 from .machine_reads import MachineReads
-                self._machine = MachineReads(self.core, self.machine_generation)
+                self._machine = MachineReads(self.core, self.machine_generation,
+                                             signing_pins=self._owner_signing_pins)
             return self._machine
 
     def _row(self, repo, *, details=False):
