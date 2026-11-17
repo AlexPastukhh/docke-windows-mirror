@@ -238,7 +238,7 @@ class MachineReads:
             for name in ('docker', 'windows', 'github')), 'PREVIEW_STALE')
 
     def reserve_signed_candidate(self, *, dispatch, actor, repo, request_id,
-                                 gateway_generation, owner_pins):
+                                 gateway_generation, owner_pins, _handoff_permit=None):
         """P4 source-only candidate: one atomic binding + receipt reservation.
 
         NOT a public operation or an execution handoff. Caller MUST authenticate
@@ -353,8 +353,47 @@ class MachineReads:
             db.execute('INSERT INTO pull_receipts VALUES(?,?,?,?)',
                        (request_id, frozen_payload, 'DISPATCHED',
                         json.dumps(progress, sort_keys=True)))
+        if _handoff_permit is not None:
+            self.worker._arm_machine_handoff(request_id, _handoff_permit,
+                                             verified.expires_at)
         return {'requestId': request_id, 'reservation': 'RESERVED',
                 'dispatchReady': False}
+
+    def dispatch_signed_candidate(self, *, dispatch, actor, repo, request_id,
+                                  gateway_generation, owner_pins):
+        """PRIVATE source-only synchronous one-use signed machine handoff.
+
+        This MUST NOT be connected to HTTP until READ, WRITE identity/pins,
+        credential lifecycle, admission and Windows crash qualification pass.
+        The only execution-capable path requires a just-created reservation;
+        EXISTING means read-only lookup, even after a crash/lost response.
+        """
+        # Keep in-process Browser and machine reservation/execution serialized.
+        # Across processes the SQLite BEGIN IMMEDIATE and WriterGuard remain
+        # the authoritative persistence and Git exclusion barriers.
+        principal(actor)
+        identifier(request_id)
+        require(type(repo) is str and REPO.fullmatch(repo), 'REPOSITORY_NOT_ALLOWED')
+        lock = self.worker._repo_lock(repo)
+        if not lock.acquire(blocking=False):
+            raise ReadError('REPOSITORY_OPERATION_PENDING')
+        try:
+            permit = object()
+            result = self.reserve_signed_candidate(
+                dispatch=dispatch, actor=actor, repo=repo,
+                request_id=request_id, gateway_generation=gateway_generation,
+                owner_pins=owner_pins, _handoff_permit=permit)
+            if result['reservation'] != 'RESERVED':
+                return self.lookup(repo, actor, request_id)
+            identity = {key: dispatch[key] for key in
+                        ('previewId','expectedHead','targetSha','configGeneration')}
+            self.worker._run_machine_reserved(
+                request_id=request_id, repo_id=repo, actor=actor,
+                identity=identity, now=int(self.clock()), permit=permit)
+            return self.lookup(repo, actor, request_id)
+        finally:
+            self.worker._discard_machine_handoff(request_id, permit)
+            lock.release()
 
     def lookup(self, repo, actor, request_id):
         principal(actor); identifier(request_id)
