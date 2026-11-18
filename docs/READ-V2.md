@@ -57,8 +57,12 @@ authoritative for the actor. All deferred actions report POLICY_DENIED.
 ## P3b principal-bound metadata and lookup
 
 The factory additionally requires an explicit owner-reviewed public
-`machine_generation` digest and a Core with safe receipt storage. Without both,
-preview/lookup stay POLICY_DENIED and basic P3a reads remain available. The digest
+machine_generation digest and a Core with safe receipt storage. The
+[source-only P5 canonical candidate proposal](unified-api/READ-V2-GENERATION.md)
+defines an offline public-manifest digest for separate owner review,
+not an approved generation or installed launcher configuration.
+Without both, preview/lookup stay POLICY_DENIED and basic P3a reads
+remain available. The digest
 must identify the reviewed Windows code/trust configuration; rotate it when that
 configuration changes. Code also binds the configured repo/inventory scopes into
 the effective generation. No launcher or installed service gains this option

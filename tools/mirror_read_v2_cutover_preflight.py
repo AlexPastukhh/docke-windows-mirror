@@ -1,4 +1,4 @@
-"""Owner-only READ v2 pre-cutover diagnostic. Never authorizes cutover.
+r"""Owner-only READ v2 pre-cutover diagnostic. Never authorizes cutover.
 
 Run from the owner Windows main clone after merge / owner-approved Pull:
   py -3 tools\mirror_read_v2_cutover_preflight.py --expected-source-sha <40-hex> \
