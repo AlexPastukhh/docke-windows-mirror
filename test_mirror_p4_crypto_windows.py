@@ -781,3 +781,106 @@ class HostedWindowsP4SignedRealGitTests(unittest.TestCase):
         self.assertEqual(len(self.fetches), 1)
         self.assertEqual(self.merges, [])
         self.assertEqual(self.git(self.clone, 'rev-parse', 'FETCH_HEAD'), changed)
+
+
+@unittest.skipUnless(importlib.util.find_spec('cryptography'),
+                     'Hosted Windows CI must verify the real Gateway Ed25519 vector')
+class GatewayP4CanonicalWireVectorTests(unittest.TestCase):
+    """Frozen Gateway sign_dispatch_identity wire vector, verified by Windows.
+
+    Public-key/signature fixtures use only the *test* seed 0x05*32 and the
+    accepted Gateway signing contract's closed identity, timestamp, canonical
+    JSON and domain separator. There is no trusted production key or request.
+    This module is already executed with cryptography by hosted Windows CI.
+    """
+    PUBLIC_KEY_HEX = (
+        '6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1')
+    FINGERPRINT = (
+        '473bfceafff40e41a185be459a35e447490754beac20c8b3763a799e4e7751c8')
+    SIGNATURE = (
+        'rFeO9Qr3eSfEEgpOQj-E4gGrQV5hPHmOEwempOvk9zk_tDGqTyKgqTiZJJxTuqzl6ioV4XmHrhP7rhMogVBjBA')
+
+    def setUp(self):
+        from mirror_api.proof_v2 import verify_new_dispatch
+        self.verify = verify_new_dispatch
+        self.identity = dict(
+            issuer='fortis-gateway', audience='fortis-mirror',
+            service='mirror', operation='execute_windows_pull_v2',
+            requestId='12345678-1234-4123-8123-123456789012',
+            actor='fixture', repoId='fortis-approvals',
+            previewId='22345678-1234-4123-8123-123456789012',
+            expectedHead='a' * 40, targetSha='b' * 40,
+            configGeneration='c' * 64)
+        claims = {**self.identity, 'fingerprint':self.FINGERPRINT,
+                  'issuedAt':1800000000, 'expiresAt':1800000050}
+        self.document = {
+            **{key: self.identity[key] for key in (
+                'requestId','actor','repoId','previewId',
+                'expectedHead','targetSha','configGeneration')},
+            'proof': {'schemaVersion':1, 'keyId':'offline-owner-pin',
+                      'claims':claims, 'signature':self.SIGNATURE}}
+        self.persisted = {
+            'readRequestId':'32345678-1234-4123-8123-123456789012',
+            'origin':'https://github.com/AlexPastukhh/fortis-approvals',
+            'snapshot':{
+                'blockers':[], 'repoId':'fortis-approvals',
+                'originIdentity':'AlexPastukhh/fortis-approvals',
+                'previewId':self.identity['previewId'],
+                'expectedHead':self.identity['expectedHead'],
+                'targetSha':self.identity['targetSha'],
+                'configGeneration':self.identity['configGeneration'],
+                'dockerHead':self.identity['targetSha'],
+                'expiresAt':'2027-01-15T08:01:00+00:00'}}
+        self.keys = PinnedEd25519Keys(
+            {'offline-owner-pin':bytes.fromhex(self.PUBLIC_KEY_HEX)},
+            owner_epoch='e' * 64)
+
+    def check(self, document=None, *, now=1800000020, persisted=None, pins=None):
+        return self.verify(
+            self.document if document is None else document,
+            authenticated_actor='fixture',
+            route_repo='fortis-approvals',
+            route_request_id=self.identity['requestId'],
+            persisted_preview=self.persisted if persisted is None else persisted,
+            owner_pins=self.keys if pins is None else pins, now=now)
+
+    def test_gateway_fixed_wire_vector_validates_full_windows_preview_binding(self):
+        self.assertEqual(DOMAIN, b'FORTIS-MIRROR-ASK-V1\n')
+        self.assertEqual(hashlib.sha256(_canonical(self.identity)).hexdigest(),
+                         self.FINGERPRINT)
+        verified = self.check()
+        self.assertEqual(verified.request_id, self.identity['requestId'])
+        self.assertEqual(verified.preview_id, self.identity['previewId'])
+        self.assertEqual(verified.expected_head, 'a' * 40)
+        self.assertEqual(verified.target_sha, 'b' * 40)
+        self.assertEqual(verified.expires_at, 1800000050)
+        # Signature verification proves claim integrity, not a reservation,
+        # owner approval or authority to run Git.
+        self.assertEqual(verified.actor, 'fixture')
+
+    def test_gateway_fixed_wire_vector_tampering_and_revocation_fail_closed(self):
+        vectors = []
+        tampered = copy.deepcopy(self.document)
+        tampered['proof']['signature'] = (
+            base64.urlsafe_b64encode(b'\x00' * 64).decode('ascii').rstrip('='))
+        vectors.append(('bad_signature',tampered,'SIGNATURE_INVALID',None,None))
+        tampered = copy.deepcopy(self.document)
+        tampered['proof']['claims']['targetSha'] = 'd' * 40
+        vectors.append(('changed_claim',tampered,'SIGNATURE_INVALID',None,None))
+        tampered = copy.deepcopy(self.document)
+        tampered['actor'] = 'foreign'
+        vectors.append(('other_actor',tampered,'PERMISSION_DENIED',None,None))
+        tampered = copy.deepcopy(self.document)
+        tampered['proof']['keyId'] = 'revoked'
+        vectors.append(('revoked_key',tampered,'UNKNOWN_KEY',None,None))
+        different = copy.deepcopy(self.persisted)
+        different['snapshot']['expectedHead'] = 'd' * 40
+        vectors.append(('changed_preview',self.document,'PREVIEW_STALE',different,None))
+        for label,payload,code,preview,pins in vectors:
+            with self.subTest(label=label),self.assertRaisesRegex(ReadError,code):
+                self.check(payload,persisted=preview,pins=pins)
+        with self.assertRaisesRegex(ReadError,'PREVIEW_EXPIRED'):
+            self.check(now=1800000050)
+        empty_pins = PinnedEd25519Keys({},owner_epoch='f'*64)
+        with self.assertRaisesRegex(ReadError,'UNKNOWN_KEY'):
+            self.check(pins=empty_pins)
