@@ -29,6 +29,10 @@ jobs:
       # Fortis Approvals owner-verifier dependency version.
       - name: Install P4 test-only Ed25519 verifier
         run: python -m pip install --disable-pip-version-check --no-input cryptography==50.0.2
+      # Pure offline Windows-owner P5 diagnostic fixture only: no live host,
+      # SQLite writer, listener, owner secrets or port 443 are touched.
+      - name: Windows P5 READ v2 owner cutover preflight guards
+        run: python -B -m unittest -v test_mirror_read_v2_cutover_preflight
       # Synthetic CA and leaf are generated in a disposable runner directory.
       # Real TLS handshake/hostname/CA checks use an ephemeral loopback port;
       # no installed Windows listener, credentials or 443 bind are touched.
