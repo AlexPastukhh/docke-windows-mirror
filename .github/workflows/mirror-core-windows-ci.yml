@@ -33,6 +33,10 @@ jobs:
       # SQLite writer, listener, owner secrets or port 443 are touched.
       - name: Windows P5 READ v2 owner cutover preflight guards
         run: python -B -m unittest -v test_mirror_read_v2_cutover_preflight
+      # Public-data-only candidate: no installed Windows cert/key,
+      # service credential, live listener, ledger or owner approval.
+      - name: Windows P5 public machine generation candidate guards
+        run: python -B -m unittest -v test_mirror_read_v2_generation
       # Synthetic CA and leaf are generated in a disposable runner directory.
       # Real TLS handshake/hostname/CA checks use an ephemeral loopback port;
       # no installed Windows listener, credentials or 443 bind are touched.
