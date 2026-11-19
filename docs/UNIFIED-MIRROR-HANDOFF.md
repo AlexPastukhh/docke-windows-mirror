@@ -12,6 +12,7 @@ READ v2/WRITE не активированы.
 [WORKFLOW](WORKFLOW.md), [READ-V2](READ-V2.md),
 [generation](unified-api/READ-V2-GENERATION.md),
 [dated P5 owner evidence](unified-api/P5_OWNER_HANDOFF_EVIDENCE_2026-11-19.md),
+[post-outage Windows/SQLite acceptance snapshot](unified-api/P5_OWNER_WINDOWS_ACCEPTANCE_UPDATE_2026-11-19.md),
 [backlog](BACKLOG-IMPROVEMENTS.md) и
 [UC-GW-012](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/own-api.md).
 Backlog heading/table previously dated **2026-11-17**; P5 evidence
@@ -28,6 +29,9 @@ Approvals GitHub/Docker/Windows main
 e349d2aa37ce1bbd5ac86b31107b6e4412cf9607.
 Fresh Gateway v1 READ request
 73e31b43-fdf3-441c-b2e5-f2a1b40b3490.
+
+**The dated source/runtime SHA lines below are superseded by the
+[2026-11-19 acceptance update](unified-api/P5_OWNER_WINDOWS_ACCEPTANCE_UPDATE_2026-11-19.md).**
 
 **First work:** recheck actual GitHub/Docker/Windows SHA,
 listener/process and Gateway catalog. Owner needs to approve public
