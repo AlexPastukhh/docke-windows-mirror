@@ -35,7 +35,8 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 ## Актуальная передача P5 (срез 2026-11-19)
 
 Для нового чата: [короткий handoff](docs/UNIFIED-MIRROR-HANDOFF.md)
-и [датированное P5 owner evidence](docs/unified-api/P5_OWNER_HANDOFF_EVIDENCE_2026-11-19.md).
+и [датированное P5 owner evidence](docs/unified-api/P5_OWNER_HANDOFF_EVIDENCE_2026-11-19.md),
+[проверки Windows/SQLite после сбоя](docs/unified-api/P5_OWNER_WINDOWS_ACCEPTANCE_UPDATE_2026-11-19.md).
 План [BACKLOG-IMPROVEMENTS](docs/BACKLOG-IMPROVEMENTS.md) содержит
 более ранний статус 2026-11-17; новые P5-факты и STOP-гейты приведены
 в датированном дополнении, без удаления истории. Source-only P5 PR #51
