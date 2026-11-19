@@ -32,6 +32,18 @@ a local copy of the old UI. Keep both Windows clones alongside one another.
 
 [Detailed Mirror workflow and security behavior](docs/WORKFLOW.md).
 
+## Актуальная передача P5 (срез 2026-11-19)
+
+Для нового чата: [короткий handoff](docs/UNIFIED-MIRROR-HANDOFF.md)
+и [датированное P5 owner evidence](docs/unified-api/P5_OWNER_HANDOFF_EVIDENCE_2026-11-19.md).
+План [BACKLOG-IMPROVEMENTS](docs/BACKLOG-IMPROVEMENTS.md) содержит
+более ранний статус 2026-11-17; новые P5-факты и STOP-гейты приведены
+в датированном дополнении, без удаления истории. Source-only P5 PR #51
+owner-merged; **production READ v2 и WRITE не активированы**, Gateway
+сохраняет READ v1. Для live-cutover требуется отдельный owner GO
+после manifest/SQLite/rollback/negative acceptance; нельзя выводить
+его из source SHA, CI или TLS PASS.
+
 ## API-first browser source (Windows owner acceptance is separate)
 
 The Windows API + local browser UI implementation is documented in [API-FIRST](docs/API-FIRST.md). Its primary view now follows the WinForms-style **13-column Docker/GitHub/Windows repository table**, with a full-copyable **«Строка»** lower panel and an optional **«Worktrees»** lower table for the selected primary repository. It reads authoritative Docker worktree inventory and Windows primary state, plus read-only GitHub main/PR/CI through Windows owner-managed gh. See [Windows GitHub reader](docs/WINDOWS-GITHUB-READ.md) for authentication, bounds and separate owner qualification. The accepted Gateway Mirror provider supports only strict `get_repository` v1 READ (GitHub NOT_CHECKED); machine ASK Pull is absent. See [API-FIRST](docs/API-FIRST.md) for current source limits and [the accepted P0 contract](docs/MIRROR_API_CONTRACT_V1.md) for versioned migration and subsequent activation gates. The owner reported basic Browser/Pull operation after updating Windows; complete negative/crash/rollback qualification and machine ASK acceptance remain **pending**. Eight source-only READ v2 operations, including principal-bound preview/lookup, are described in [READ-V2](docs/READ-V2.md); no launcher, credential or v2 grant is automatically activated. Source includes an independent owner-local Browser Pull path with single-click exact-SHA preflight, not a Gateway ASK. The existing WinForms launcher is retained until Windows owner acceptance. Do not interpret the source candidate as a released replacement.
