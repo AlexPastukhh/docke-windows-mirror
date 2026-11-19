@@ -16,6 +16,9 @@ READ v2/WRITE не активированы.
 [UC-GW-012](https://github.com/AlexPastukhh/fortis-approvals/blob/main/docs/use-cases/own-api.md).
 Backlog heading/table previously dated **2026-11-17**; P5 evidence
 is the newer dated supplement and MUST be read alongside it.
+P5 [isolated ledger restore verifier proposal](unified-api/P5_LEDGER_ISOLATED_RESTORE_PREP_2026-11-19.md)
+adds offline **backup-copy-only** source and fixture checks. It does not
+capture the production DB, certify an owner restore, or change READ v1.
 Старый handoff ошибочно начинал с P4; **P4 signed ASK/WRITE —
 отдельный незавершённый трек**.
 
