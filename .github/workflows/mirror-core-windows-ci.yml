@@ -40,6 +40,16 @@ jobs:
       # Synthetic CA and leaf are generated in a disposable runner directory.
       # Real TLS handshake/hostname/CA checks use an ephemeral loopback port;
       # no installed Windows listener, credentials or 443 bind are touched.
+      # Explicit owner-only startup candidate, mocked 443 bind and synthetic
+      # files; syntax inspection is read-only, never starts the owner listener.
+      - name: Windows READ v2 shared-Core launcher + PowerShell 5.1 source guards
+        shell: powershell
+        run: |
+          python -B -m unittest -v test_mirror_read_v2_launcher
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'Start-MirrorAPI.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'MIRROR_V2_LAUNCHER_PS_PARSE_FAILED' }
       - name: Windows READ v2 real TLS SAN, CA and method negatives
         run: python -B -m unittest -v test_mirror_read_v2_tls_windows
       - name: Windows P4 real Ed25519 and private HTTP/ledger negative fixtures
