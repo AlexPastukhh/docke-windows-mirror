@@ -12,8 +12,10 @@ and schemas still own wire shapes; `get_repository` v1 remains unchanged.
 The new `mirror_api.gateway_v2.create_server` factory takes the **existing
 MirrorCore**, explicit exact `allowed_repos` and a finite `inventories` mapping.
 It reuses the existing fixed HTTPS/443 TLS/private-file factory and also serves
-v1 through the same Core. No launcher calls it automatically. The standalone
-v1 pilot and running Browser remain unchanged by source publication. No second worker, guard or receipt database is created. Basic observations remain
+v1 through the same Core. No default launcher calls it automatically. S3 adds a separate **explicit
+owner-window** `-GatewayReadV2` source-only entrypoint; it does not attach to
+an already running Browser, install a service or turn on a Gateway grant.
+The standalone v1 pilot and running Browser remain unchanged by source publication. No second worker, guard or receipt database is created. Basic observations remain
 independent of writer initialization; bound reads reuse the existing Core ledger.
 No credential or deployment is created.
 
@@ -117,6 +119,71 @@ actual Gateway-namespace HTTPS acceptance; wrong-CA/hostname/scope/no-auth/write
 negative probes; fresh typed READ acceptance. Do not run a second listener on the
 occupied 443 port or change certificates/secrets just to test source. P5 owns
 launcher cutover. No effect is authorized by this document.
+
+
+## S3: owner-window shared-Core launcher (source-only, no production GO)
+
+`Start-MirrorAPI.ps1` retains its unchanged default `mirror_api.server` launch.
+The **optional** `-GatewayReadV2` switch instead starts
+`mirror_api.gateway_v2_launcher` as one new Windows Browser process. It creates
+one `MirrorServer` and exactly one `MirrorCore`, then passes that same Core to
+`gateway_v2.create_server`. Its single HTTPS/443 endpoint serves *both* v1 and
+v2 GET routes, using the existing pinned TLS/Bearer implementation and closed
+pilot scope `mirror-pilot -> [fortis-approvals]`. No WRITE endpoint is opened.
+The source helper is NOT a new credential provider or Gateway policy/grant.
+
+The new owner CLI requires the existing reviewed certificate, key and READ
+Bearer **file paths** (never the secret value) and the independently approved
+public 64-hex `machine_generation`. It requires Windows, exact loopback bind
+`127.0.0.1`, browser port distinct from 443, and the existing default
+`%LOCALAPPDATA%\FortisMirror\pull-receipts.sqlite3`. It has **no** option to
+change the receipt database, repo allowlist, inventory scope, HTTPS bind or
+443 port. Only metadata and the 16-byte SQLite header are read before launch;
+no SQLite connection, writer, WAL/SHM or new receipt store is created by the
+preflight. Header PASS is not database integrity, ACL compliance, live handle
+binding or worker quiescence. The first bound preview may initialize the
+*existing* Core worker and ledger; that is an owner-release test, not a
+side-effect-free source readiness check.
+
+The source-only wrapper arguments have this shape, **NOT an executable owner
+instruction until separately authorized cutover**:
+
+```powershell
+# REFERENCE ONLY — DO NOT RUN WITHOUT SEPARATE OWNER P5 PRODUCTION GO
+.\Start-MirrorAPI.ps1 -GatewayReadV2 `
+    -GatewayCertificate '<owner-reviewed-existing-leaf-pem-path>' `
+    -GatewayPrivateKey '<owner-private-existing-key-path>' `
+    -GatewaySecretFile '<owner-private-existing-READ-Bearer-file-path>' `
+    -GatewayMachineGeneration '<owner-approved-public-64-hex-digest>'
+```
+
+A new source SHA after S3 merge **changes the public generation input**.
+Recompute and independently approve the manifest with the *installed*
+Windows source SHA, current TLS certificate fingerprints, credential epoch,
+repo scope and ledger contract. Do not reuse a prior candidate or accept any
+syntactically valid digest as proof of owner approval.
+
+**Cutover is a distinct release step, not part of this PR.** The owner must
+first establish a maintenance window that excludes new and active Pulls, attest
+the actual loaded Browser/READ v1 process code and shared default ledger,
+verify an up-to-date online SQLite backup, all receipts and UNCERTAIN states,
+source-folder/file ACL and exact rollback SDDL, and approve a documented
+rollback and credential/manifest epoch. A currently occupied port 443 is a
+**STOP**, never a reason to kill an existing READ v1 listener. There is no
+automatic process stop, listener replacement or secret rotation. After owner
+approves and performs the controlled stop of the old Browser and standalone
+READ v1 listener, the new process would have to pass fresh Windows and
+Gateway-namespace TLS/CA/SAN/Bearer, v1 compatibility, eight typed READ v2,
+negative scope/method/path and principal-bound receipt acceptance. Any failure
+requires the approved rollback to the prior Browser/v1 listener and preserved
+original ledger. No unreviewed ACL or SQLite replacement is permitted.
+
+Linux source tests run `test_mirror_read_v2_launcher.py` with synthetic files,
+mock Windows platform and mock HTTPS bind; real TLS fixture
+`test_mirror_read_v2_tls_windows.py` uses an ephemeral fixture port.
+Windows CI checks the PowerShell source AST and the same launcher tests.
+These tests do not exercise actual 443, owner files, Gateway grants or runtime
+readiness; production READ v2 remains **NO GO**.
 
 Offline checks: normal source unittest discovery includes v2 ingress/domain
 regressions; `python docs/unified-api/validate.py` validates schemas, P0 examples
